@@ -39,7 +39,7 @@ def mock_storyline_manager():
     """Mock StorylineManager"""
     manager = Mock(spec=StorylineManager)
     manager.repository = Mock()
-    manager.repository.find_by_novel.return_value = []
+    manager.repository.get_by_novel_id.return_value = []
     manager.get_storyline_context.return_value = "Main storyline context"
     return manager
 

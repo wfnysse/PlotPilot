@@ -283,7 +283,7 @@ def get_storylines(
 ):
     """获取小说的所有故事线"""
     try:
-        storylines = manager.repository.find_by_novel(NovelId(novel_id))
+        storylines = manager.repository.get_by_novel_id(NovelId(novel_id))
 
         return [
             StorylineResponse(

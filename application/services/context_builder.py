@@ -6,6 +6,7 @@ from domain.bible.services.relationship_engine import RelationshipEngine
 from domain.novel.services.storyline_manager import StorylineManager
 from domain.novel.repositories.novel_repository import NovelRepository
 from domain.novel.repositories.chapter_repository import ChapterRepository
+from domain.novel.value_objects.novel_id import NovelId
 from domain.ai.services.vector_store import VectorStore
 
 
@@ -134,7 +135,8 @@ class ContextBuilder:
         parts = []
 
         # 小说元数据
-        novel = self.novel_repository.get_by_id(novel_id)
+        nid = NovelId(novel_id)
+        novel = self.novel_repository.get_by_id(nid)
         if novel:
             parts.append(f"Novel: {novel.title}")
             parts.append(f"Author: {novel.author}")
@@ -144,7 +146,7 @@ class ContextBuilder:
         parts.append(f"Outline: {outline}")
 
         # 活跃故事线
-        storylines = self.storyline_manager.repository.find_by_novel(novel_id)
+        storylines = self.storyline_manager.repository.get_by_novel_id(nid)
         if storylines:
             parts.append("\nActive Storylines:")
             for storyline in storylines:
@@ -257,7 +259,7 @@ class ContextBuilder:
         parts = []
 
         # 最近章节
-        all_chapters = self.chapter_repository.find_by_novel(novel_id)
+        all_chapters = self.chapter_repository.list_by_novel(NovelId(novel_id))
         recent_chapters = [c for c in all_chapters if c.number < chapter_number]
         recent_chapters = sorted(recent_chapters, key=lambda c: c.number, reverse=True)[:5]
 

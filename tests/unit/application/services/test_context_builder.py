@@ -59,7 +59,7 @@ class TestContextBuilder:
         storyline.estimated_chapter_start = 1
         storyline.estimated_chapter_end = 10
         storyline.get_pending_milestones.return_value = []
-        storyline_manager.repository.find_by_novel.return_value = [storyline]
+        storyline_manager.repository.get_by_novel_id.return_value = [storyline]
 
         # Mock characters
         char1 = Character(CharacterId("char1"), "Alice", "Protagonist")
@@ -69,7 +69,7 @@ class TestContextBuilder:
         }
 
         # Mock chapters
-        chapter_repo.find_by_novel.return_value = []
+        chapter_repo.list_by_novel.return_value = []
 
         # Mock relationship graph
         relationship_engine._graph = RelationshipGraph()
@@ -115,7 +115,7 @@ class TestContextBuilder:
         novel_repo.get_by_id.return_value = novel
 
         # Mock storylines
-        storyline_manager.repository.find_by_novel.return_value = []
+        storyline_manager.repository.get_by_novel_id.return_value = []
 
         # Mock many characters with long descriptions
         chars = []
@@ -133,7 +133,7 @@ class TestContextBuilder:
         }
 
         # Mock chapters
-        chapter_repo.find_by_novel.return_value = []
+        chapter_repo.list_by_novel.return_value = []
 
         # Mock relationship graph
         relationship_engine._graph = RelationshipGraph()
@@ -178,7 +178,7 @@ class TestContextBuilder:
         novel_repo.get_by_id.return_value = novel
 
         # Mock storylines
-        storyline_manager.repository.find_by_novel.return_value = []
+        storyline_manager.repository.get_by_novel_id.return_value = []
 
         # Mock characters
         char_registry.get_characters_for_context.return_value = []
@@ -195,7 +195,7 @@ class TestContextBuilder:
         chapter2.title = "Chapter 2"
         chapter2.content = "Content of chapter 2"
 
-        chapter_repo.find_by_novel.return_value = [chapter1, chapter2]
+        chapter_repo.list_by_novel.return_value = [chapter1, chapter2]
 
         # Mock relationship graph
         relationship_engine._graph = RelationshipGraph()
@@ -245,14 +245,14 @@ class TestContextBuilder:
         storyline.estimated_chapter_start = 1
         storyline.estimated_chapter_end = 10
         storyline.get_pending_milestones.return_value = []
-        storyline_manager.repository.find_by_novel.return_value = [storyline]
+        storyline_manager.repository.get_by_novel_id.return_value = [storyline]
 
         # Mock characters
         char_registry.get_characters_for_context.return_value = []
         char_registry.characters_by_importance = {}
 
         # Mock chapters
-        chapter_repo.find_by_novel.return_value = []
+        chapter_repo.list_by_novel.return_value = []
 
         # Mock relationship graph
         relationship_engine._graph = RelationshipGraph()
@@ -299,7 +299,7 @@ class TestContextBuilder:
         novel_repo.get_by_id.return_value = novel
 
         # Mock storylines
-        storyline_manager.repository.find_by_novel.return_value = []
+        storyline_manager.repository.get_by_novel_id.return_value = []
 
         # Mock many characters
         chars = []
@@ -324,7 +324,7 @@ class TestContextBuilder:
             chapter.title = f"Chapter {i+1}"
             chapter.content = f"Content of chapter {i+1}" * 100
             chapters.append(chapter)
-        chapter_repo.find_by_novel.return_value = chapters
+        chapter_repo.list_by_novel.return_value = chapters
 
         # Mock relationship graph
         relationship_engine._graph = RelationshipGraph()

@@ -64,7 +64,7 @@ class TestContextBuilderIntegration:
             estimated_chapter_start=1,
             estimated_chapter_end=20
         )
-        storyline_repo.find_by_novel.return_value = [storyline]
+        storyline_repo.get_by_novel_id.return_value = [storyline]
 
         storyline_manager = StorylineManager(storyline_repo)
 
@@ -83,7 +83,7 @@ class TestContextBuilderIntegration:
         prev_chapter.number = 5
         prev_chapter.title = "The Betrayal"
         prev_chapter.content = "Alice discovered the truth about her family's death..."
-        chapter_repo.find_by_novel.return_value = [prev_chapter]
+        chapter_repo.list_by_novel.return_value = [prev_chapter]
 
         # 5. 创建上下文构建器
         context_builder = ContextBuilder(
@@ -190,7 +190,7 @@ class TestContextBuilderIntegration:
         relationship_engine = RelationshipEngine(relationship_graph)
 
         storyline_manager = Mock()
-        storyline_manager.repository.find_by_novel.return_value = []
+        storyline_manager.repository.get_by_novel_id.return_value = []
 
         vector_store = Mock()
         novel_repo = Mock()
@@ -201,7 +201,7 @@ class TestContextBuilderIntegration:
         novel.author = "Author"
         novel_repo.get_by_id.return_value = novel
 
-        chapter_repo.find_by_novel.return_value = []
+        chapter_repo.list_by_novel.return_value = []
 
         # 创建上下文构建器
         context_builder = ContextBuilder(

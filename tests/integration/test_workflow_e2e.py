@@ -31,7 +31,7 @@ def mock_dependencies():
     # Mock StorylineManager
     storyline_manager = Mock(spec=StorylineManager)
     storyline_manager.repository = Mock()
-    storyline_manager.repository.find_by_novel.return_value = []
+    storyline_manager.repository.get_by_novel_id.return_value = []
 
     # Mock PlotArcRepository
     plot_arc_repository = Mock(spec=PlotArcRepository)

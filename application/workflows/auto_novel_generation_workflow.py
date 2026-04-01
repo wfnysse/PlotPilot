@@ -270,7 +270,7 @@ class AutoNovelGenerationWorkflow:
                 return "Storyline context unavailable"
 
             # 获取所有活跃的故事线
-            storylines = self.storyline_manager.repository.find_by_novel(NovelId(novel_id))
+            storylines = self.storyline_manager.repository.get_by_novel_id(NovelId(novel_id))
             active_storylines = [
                 s for s in storylines
                 if s.estimated_chapter_start <= chapter_number <= s.estimated_chapter_end

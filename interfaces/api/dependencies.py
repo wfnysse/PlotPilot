@@ -301,8 +301,8 @@ def get_context_builder() -> ContextBuilder:
     """
     from domain.bible.entities.character_registry import CharacterRegistry
 
-    # 创建空的 CharacterRegistry（简化实现）
-    character_registry = CharacterRegistry(id="temp")
+    # 创建空的 CharacterRegistry（简化实现；需 novel_id 与领域模型一致）
+    character_registry = CharacterRegistry(id="temp-registry", novel_id="temp-novel")
 
     return ContextBuilder(
         character_registry=character_registry,
