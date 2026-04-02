@@ -1,0 +1,37 @@
+INFO:     Will watch for changes in these directories: ['D:\\CODE\\aitext']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [182716] using WatchFiles
+INFO:     Started server process [181832]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:55418 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52219 - "GET /api/v1/novels/novel-1775066530753/statistics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52225 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52224 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52223 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52227 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62314 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:62313 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51251 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51499 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:51251 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51498 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65409 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:51251 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65408 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58891 - "GET /api/v1/novels HTTP/1.1" 307 Temporary Redirect
+INFO:     127.0.0.1:58890 - "GET /api/stats/global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58893 - "GET /api/v1/novels/novel-1775066530753/statistics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54884 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54883 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54885 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55161 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56151 - "GET /api/v1/novels/ HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51517 - "GET /api/v1/novels/novel-1775066530753/chapters/4 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58063 - "GET /api/v1/novels/novel-1775066530753/chapters/2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59728 - "GET /api/v1/novels/novel-1775066530753/statistics HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57800 - "GET /api/v1/novels/novel-1775066530753/knowledge HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57804 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57803 - "GET /api/v1/novels/novel-1775066530753 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53136 - "GET /api/v1/novels/novel-1775066530753/chapters HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56474 - "GET /api/v1/novels/novel-1775066530753/chapters/1 HTTP/1.1" 200 OK

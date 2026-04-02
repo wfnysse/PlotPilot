@@ -1,4 +1,5 @@
 """Chapter 数据映射器"""
+import re
 from typing import Dict, Any
 from domain.novel.entities.chapter import Chapter, ChapterStatus
 from domain.novel.value_objects.novel_id import NovelId
@@ -15,6 +16,30 @@ class ChapterMapper:
     """
 
     @staticmethod
+    def _extract_title_from_content(content: str) -> str:
+        """从content中提取标题
+
+        Args:
+            content: 章节内容
+
+        Returns:
+            提取的标题，如果没有找到则返回空字符串
+        """
+        if not content:
+            return ""
+
+        # 查找第一行的Markdown标题
+        lines = content.split('\n')
+        for line in lines:
+            line = line.strip()
+            if line.startswith('#'):
+                # 移除#号和空格
+                title = re.sub(r'^#+\s*', '', line)
+                return title
+
+        return ""
+
+    @staticmethod
     def to_dict(chapter: Chapter) -> Dict[str, Any]:
         """将 Chapter 实体转换为字典
 
@@ -24,11 +49,17 @@ class ChapterMapper:
         Returns:
             字典表示
         """
+        # 尝试从content中提取标题
+        extracted_title = ChapterMapper._extract_title_from_content(chapter.content)
+
+        # 如果提取到了标题且不同于当前标题，使用提取的标题
+        title = extracted_title if extracted_title else chapter.title
+
         return {
             "id": chapter.id,
             "novel_id": chapter.novel_id.value,
             "number": chapter.number,
-            "title": chapter.title,
+            "title": title,
             "content": chapter.content,
             "word_count": chapter.word_count.value
         }
