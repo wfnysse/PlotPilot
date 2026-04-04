@@ -499,8 +499,8 @@ const handleNext = async () => {
       await bibleApi.generateBible(props.novelId, 'characters')
       // 轮询检查人物生成状态
       const checkCharacters = async () => {
-        const status = await bibleApi.getBibleStatus(props.novelId)
-        if (status.ready) {
+        const bible = await bibleApi.getBible(props.novelId)
+        if (bible.characters && bible.characters.length > 0) {
           generatingCharacters.value = false
           charactersGenerated.value = true
         } else {
@@ -520,8 +520,8 @@ const handleNext = async () => {
       await bibleApi.generateBible(props.novelId, 'locations')
       // 轮询检查地点生成状态
       const checkLocations = async () => {
-        const status = await bibleApi.getBibleStatus(props.novelId)
-        if (status.ready) {
+        const bible = await bibleApi.getBible(props.novelId)
+        if (bible.locations && bible.locations.length > 0) {
           generatingLocations.value = false
           locationsGenerated.value = true
         } else {

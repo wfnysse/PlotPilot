@@ -290,8 +290,14 @@ def get_auto_workflow() -> AutoNovelGenerationWorkflow:
     Returns:
         AutoNovelGenerationWorkflow 实例
     """
-    settings = _anthropic_settings(require_key=True)
-    llm_service = AnthropicProvider(settings)
+    settings = _anthropic_settings(require_key=False)
+    if settings:
+        llm_service = AnthropicProvider(settings)
+        logger.info("Using AnthropicProvider for workflow")
+    else:
+        from infrastructure.ai.providers.mock_provider import MockProvider
+        llm_service = MockProvider()
+        logger.warning("No API key found, using MockProvider for workflow")
 
     return AutoNovelGenerationWorkflow(
         context_builder=get_context_builder(),
@@ -312,8 +318,15 @@ def get_auto_bible_generator() -> AutoBibleGenerator:
     Returns:
         AutoBibleGenerator 实例
     """
-    settings = _anthropic_settings(require_key=True)
-    llm_service = AnthropicProvider(settings)
+    # Try to get Anthropic settings, fall back to mock if no API key
+    settings = _anthropic_settings(require_key=False)
+    if settings:
+        llm_service = AnthropicProvider(settings)
+        logger.info("Using AnthropicProvider for Bible generation")
+    else:
+        from infrastructure.ai.providers.mock_provider import MockProvider
+        llm_service = MockProvider()
+        logger.warning("No API key found, using MockProvider for Bible generation")
 
     # 导入 WorldbuildingService 和 TripleRepository
     from application.services.worldbuilding_service import WorldbuildingService
@@ -340,8 +353,12 @@ def get_state_extractor() -> StateExtractor:
     Returns:
         StateExtractor 实例
     """
-    settings = _anthropic_settings(require_key=True)
-    llm_service = AnthropicProvider(settings)
+    settings = _anthropic_settings(require_key=False)
+    if settings:
+        llm_service = AnthropicProvider(settings)
+    else:
+        from infrastructure.ai.providers.mock_provider import MockProvider
+        llm_service = MockProvider()
     return StateExtractor(llm_service=llm_service)
 
 
@@ -351,8 +368,12 @@ def get_auto_knowledge_generator() -> AutoKnowledgeGenerator:
     Returns:
         AutoKnowledgeGenerator 实例
     """
-    settings = _anthropic_settings(require_key=True)
-    llm_service = AnthropicProvider(settings)
+    settings = _anthropic_settings(require_key=False)
+    if settings:
+        llm_service = AnthropicProvider(settings)
+    else:
+        from infrastructure.ai.providers.mock_provider import MockProvider
+        llm_service = MockProvider()
     return AutoKnowledgeGenerator(
         llm_service=llm_service,
         knowledge_service=get_knowledge_service()

@@ -2,6 +2,7 @@
 import logging
 import json
 import uuid
+import sys
 from typing import Dict, Any
 from datetime import datetime
 from domain.ai.services.llm_service import LLMService, GenerationConfig
@@ -10,7 +11,7 @@ from application.services.bible_service import BibleService
 from application.services.worldbuilding_service import WorldbuildingService
 from domain.bible.triple import Triple, SourceType
 from infrastructure.persistence.database.triple_repository import TripleRepository
-from domain.bible.exceptions import EntityNotFoundError
+from domain.shared.exceptions import EntityNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -80,16 +81,23 @@ class AutoBibleGenerator:
                 await self._save_worldbuilding(novel_id, bible_data["worldbuilding"])
 
         elif stage == "worldbuilding":
+            import sys
+            print(f"[DEBUG] Stage worldbuilding - checking Bible record", file=sys.stderr, flush=True)
             # 确保Bible记录存在
             try:
-                self.bible_service.get_bible(novel_id)
+                self.bible_service.get_bible_by_novel(novel_id)
             except EntityNotFoundError:
-                bible_id = f"bible-{novel_id}"
+                bible_id = f"{novel_id}-bible"
                 self.bible_service.create_bible(bible_id, novel_id)
                 logger.info(f"Created Bible record: {bible_id}")
 
+            print(f"[DEBUG] Calling _generate_worldbuilding_and_style", file=sys.stderr, flush=True)
             # 只生成世界观和文风
             bible_data = await self._generate_worldbuilding_and_style(premise, target_chapters)
+            print(f"[DEBUG] _generate_worldbuilding_and_style completed", file=sys.stderr, flush=True)
+            print(f"[DEBUG] bible_data keys: {bible_data.keys()}", file=sys.stderr, flush=True)
+            print(f"[DEBUG] Has 'worldbuilding' key: {'worldbuilding' in bible_data}", file=sys.stderr, flush=True)
+            print(f"[DEBUG] worldbuilding_service is None: {self.worldbuilding_service is None}", file=sys.stderr, flush=True)
             # 保存文风
             if "style" in bible_data:
                 style_id = f"{novel_id}-style-1"
@@ -114,10 +122,10 @@ class AutoBibleGenerator:
         elif stage == "characters":
             # 确保Bible记录存在
             try:
-                self.bible_repository.get_bible_by_novel(novel_id)
+                self.bible_service.get_bible_by_novel(novel_id)
             except EntityNotFoundError:
-                bible_id = f"bible-{novel_id}"
-                self.bible_repository.create_bible(bible_id, novel_id)
+                bible_id = f"{novel_id}-bible"
+                self.bible_service.create_bible(bible_id, novel_id)
                 logger.info(f"Created Bible record: {bible_id}")
 
             # 基于已有世界观生成人物
@@ -151,10 +159,10 @@ class AutoBibleGenerator:
         elif stage == "locations":
             # 确保Bible记录存在
             try:
-                self.bible_repository.get_bible_by_novel(novel_id)
+                self.bible_service.get_bible_by_novel(novel_id)
             except EntityNotFoundError:
-                bible_id = f"bible-{novel_id}"
-                self.bible_repository.create_bible(bible_id, novel_id)
+                bible_id = f"{novel_id}-bible"
+                self.bible_service.create_bible(bible_id, novel_id)
                 logger.info(f"Created Bible record: {bible_id}")
 
             # 基于已有世界观和人物生成地点
@@ -411,24 +419,53 @@ JSON 格式（不要有其他文字）：
                     raise
 
     async def _save_worldbuilding(self, novel_id: str, worldbuilding_data: Dict[str, Any]) -> None:
-        """保存世界观到数据库"""
-        if not self.worldbuilding_service:
-            logger.warning("WorldbuildingService not available, skipping worldbuilding save")
-            return
+        """保存世界观到数据库（同时保存到Worldbuilding表和Bible的world_settings）"""
+        print(f"[DEBUG] _save_worldbuilding called with data: {worldbuilding_data}", file=sys.stderr, flush=True)
 
+        # 1. 保存到Worldbuilding表（用于后续生成人物和地点时读取）
+        if self.worldbuilding_service:
+            try:
+                print(f"[DEBUG] Calling worldbuilding_service.update_worldbuilding", file=sys.stderr, flush=True)
+                self.worldbuilding_service.update_worldbuilding(
+                    novel_id=novel_id,
+                    core_rules=worldbuilding_data.get("core_rules"),
+                    geography=worldbuilding_data.get("geography"),
+                    society=worldbuilding_data.get("society"),
+                    culture=worldbuilding_data.get("culture"),
+                    daily_life=worldbuilding_data.get("daily_life")
+                )
+                print(f"[DEBUG] Worldbuilding saved to Worldbuilding table", file=sys.stderr, flush=True)
+                logger.info(f"Worldbuilding saved for {novel_id}")
+            except Exception as e:
+                print(f"[DEBUG] Failed to save worldbuilding: {e}", file=sys.stderr, flush=True)
+                logger.error(f"Failed to save worldbuilding: {e}")
+
+        # 2. 同时保存到Bible的world_settings（用于前端显示）
         try:
-            # 创建或更新世界观
-            self.worldbuilding_service.update_worldbuilding(
-                novel_id=novel_id,
-                core_rules=worldbuilding_data.get("core_rules"),
-                geography=worldbuilding_data.get("geography"),
-                society=worldbuilding_data.get("society"),
-                culture=worldbuilding_data.get("culture"),
-                daily_life=worldbuilding_data.get("daily_life")
-            )
-            logger.info(f"Worldbuilding saved for {novel_id}")
+            print(f"[DEBUG] Saving worldbuilding to Bible.world_settings", file=sys.stderr, flush=True)
+            bible = self.bible_service.get_bible_by_novel(novel_id)
+            if not bible:
+                bible_id = f"{novel_id}-bible"
+                self.bible_service.create_bible(bible_id, novel_id)
+
+            # 将5维度数据转换为world_setting条目
+            # WorldSetting的type只能是'rule', 'location', 'item'，所以统一使用'rule'
+            import uuid
+            for dimension_name, dimension_data in worldbuilding_data.items():
+                if isinstance(dimension_data, dict):
+                    for key, value in dimension_data.items():
+                        setting_id = f"{novel_id}-ws-{uuid.uuid4().hex[:8]}"
+                        self.bible_service.add_world_setting(
+                            novel_id=novel_id,
+                            setting_id=setting_id,
+                            name=f"{dimension_name}.{key}",
+                            description=value,
+                            setting_type="rule"  # 统一使用'rule'类型
+                        )
+            print(f"[DEBUG] Worldbuilding saved to Bible.world_settings successfully", file=sys.stderr, flush=True)
         except Exception as e:
-            logger.error(f"Failed to save worldbuilding: {e}")
+            print(f"[DEBUG] Failed to save to Bible.world_settings: {e}", file=sys.stderr, flush=True)
+            logger.error(f"Failed to save to Bible.world_settings: {e}")
 
     def _load_worldbuilding(self, novel_id: str) -> Dict[str, Any]:
         """加载已有世界观"""
@@ -608,12 +645,16 @@ JSON 格式：
 
     async def _call_llm_and_parse(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         """调用 LLM 并解析 JSON"""
+        print(f"[DEBUG] _call_llm_and_parse: Creating prompt", file=sys.stderr, flush=True)
         prompt = Prompt(system=system_prompt, user=user_prompt)
         config = GenerationConfig(max_tokens=2048, temperature=0.7)
+        print(f"[DEBUG] _call_llm_and_parse: Calling LLM service", file=sys.stderr, flush=True)
         result = await self.llm_service.generate(prompt, config)
+        print(f"[DEBUG] _call_llm_and_parse: LLM returned result", file=sys.stderr, flush=True)
 
         try:
             content = result.content.strip()
+            print(f"[DEBUG] Raw LLM content length: {len(content)}", file=sys.stderr, flush=True)
 
             # 移除可能的 markdown 代码块标记
             if "```json" in content:
@@ -629,10 +670,16 @@ JSON 格式：
             if start != -1 and end != -1:
                 content = content[start:end+1]
 
-            return json.loads(content)
+            print(f"[DEBUG] Cleaned content length: {len(content)}", file=sys.stderr, flush=True)
+            parsed = json.loads(content)
+            print(f"[DEBUG] Successfully parsed JSON with keys: {list(parsed.keys())}", file=sys.stderr, flush=True)
+            return parsed
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON: {e}")
-            logger.error(f"Raw content: {content[:500]}")
+            logger.error(f"Content length: {len(content)}")
+            logger.error(f"Raw content (first 1000 chars): {content[:1000]}")
+            logger.error(f"Raw content (last 500 chars): {content[-500:]}")
+            print(f"[DEBUG] JSON parse failed, returning empty dict", file=sys.stderr, flush=True)
             return {}
 
     async def _generate_character_triples(self, novel_id: str, character_ids: list):
@@ -692,7 +739,7 @@ JSON 格式：
                         object_type="character",
                         object_id=target_char_id,
                         confidence=0.9,
-                        source_type=SourceType.INFERRED,
+                        source_type=SourceType.AUTO_INFERRED,
                         description=description,
                         created_at=datetime.now(),
                         updated_at=datetime.now()
@@ -758,7 +805,7 @@ JSON 格式：
                         object_type="location",
                         object_id=target_loc_id,
                         confidence=0.9,
-                        source_type=SourceType.INFERRED,
+                        source_type=SourceType.AUTO_INFERRED,
                         description=description,
                         created_at=datetime.now(),
                         updated_at=datetime.now()

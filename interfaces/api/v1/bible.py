@@ -235,7 +235,8 @@ async def get_bible_status(
     try:
         bible = service.get_bible_by_novel(novel_id)
         exists = bible is not None
-        ready = exists and len(bible.characters) > 0  # 有角色说明已生成完成
+        # 修改ready逻辑：只要有文风公约或世界观就算ready（支持分阶段生成）
+        ready = exists and (len(bible.style_notes) > 0 or len(bible.world_settings) > 0 or len(bible.characters) > 0)
 
         return {
             "exists": exists,

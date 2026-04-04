@@ -191,7 +191,7 @@ const getStatusColor = (status: string) => {
 const loadStorylines = async () => {
   loading.value = true
   try {
-    const response = await axios.get(`http://localhost:8007/api/v1/novels/${props.slug}/storylines`)
+    const response = await axios.get(`/api/v1/novels/${props.slug}/storylines`)
     storylines.value = response.data
   } catch (error: any) {
     message.error(error.response?.data?.detail || '加载故事线失败')
@@ -208,7 +208,7 @@ const handleSubmit = async () => {
 
   saving.value = true
   try {
-    await axios.post(`http://localhost:8007/api/v1/novels/${props.slug}/storylines`, formData.value)
+    await axios.post(`/api/v1/novels/${props.slug}/storylines`, formData.value)
     message.success('故事线创建成功')
     showCreateModal.value = false
     await loadStorylines()

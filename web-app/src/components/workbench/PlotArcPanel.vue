@@ -284,7 +284,7 @@ const getTensionTypeColor = (tension: number) => {
 const loadPlotArc = async () => {
   loading.value = true
   try {
-    const response = await axios.get(`http://localhost:8007/api/v1/novels/${props.slug}/plot-arc`)
+    const response = await axios.get(`/api/v1/novels/${props.slug}/plot-arc`)
     plotPoints.value = response.data.key_points || []
   } catch (error: any) {
     if (error.response?.status === 404) {
@@ -338,7 +338,7 @@ const savePlotArc = async () => {
 
   saving.value = true
   try {
-    await axios.post(`http://localhost:8007/api/v1/novels/${props.slug}/plot-arc`, {
+    await axios.post(`/api/v1/novels/${props.slug}/plot-arc`, {
       key_points: plotPoints.value
     })
     message.success('情节弧线保存成功')
