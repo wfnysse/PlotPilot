@@ -211,3 +211,155 @@ CREATE TABLE IF NOT EXISTS chapter_scenes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chapter_scenes_chapter ON chapter_scenes(chapter_id);
+
+-- ========== Bible（自包含子表，外键仅指向 novels）==========
+CREATE TABLE IF NOT EXISTS bibles (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL UNIQUE,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    extensions TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bibles_novel_id ON bibles(novel_id);
+
+CREATE TABLE IF NOT EXISTS bible_characters (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bible_characters_novel ON bible_characters(novel_id);
+
+CREATE TABLE IF NOT EXISTS bible_character_relationships (
+    id TEXT PRIMARY KEY,
+    character_id TEXT NOT NULL,
+    target_name TEXT NOT NULL,
+    relation TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (character_id) REFERENCES bible_characters(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bible_char_rels_character ON bible_character_relationships(character_id);
+
+CREATE TABLE IF NOT EXISTS bible_world_settings (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    setting_type TEXT NOT NULL DEFAULT 'other',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bible_world_novel ON bible_world_settings(novel_id);
+
+CREATE TABLE IF NOT EXISTS bible_locations (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    location_type TEXT NOT NULL DEFAULT 'other',
+    parent_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bible_locations_novel ON bible_locations(novel_id);
+
+CREATE TABLE IF NOT EXISTS bible_timeline_notes (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL,
+    event TEXT NOT NULL DEFAULT '',
+    time_point TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bible_timeline_novel ON bible_timeline_notes(novel_id, sort_order);
+
+CREATE TABLE IF NOT EXISTS bible_style_notes (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL,
+    category TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_bible_style_novel ON bible_style_notes(novel_id);
+
+-- ========== 故事线 + 里程碑 ==========
+CREATE TABLE IF NOT EXISTS storylines (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL,
+    storyline_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    estimated_chapter_start INTEGER NOT NULL,
+    estimated_chapter_end INTEGER NOT NULL,
+    current_milestone_index INTEGER NOT NULL DEFAULT 0,
+    extensions TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_storylines_novel ON storylines(novel_id);
+
+CREATE TABLE IF NOT EXISTS storyline_milestones (
+    id TEXT PRIMARY KEY,
+    storyline_id TEXT NOT NULL,
+    milestone_order INTEGER NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    description TEXT NOT NULL DEFAULT '',
+    target_chapter_start INTEGER NOT NULL,
+    target_chapter_end INTEGER NOT NULL,
+    prerequisite_list TEXT NOT NULL DEFAULT '',
+    milestone_triggers TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (storyline_id) REFERENCES storylines(id) ON DELETE CASCADE,
+    UNIQUE(storyline_id, milestone_order)
+);
+
+CREATE INDEX IF NOT EXISTS idx_storyline_milestones_storyline ON storyline_milestones(storyline_id);
+
+-- ========== 情节弧 + 剧情点（一书多弧，slug 区分卷/视角等；API 默认 slug=default）==========
+CREATE TABLE IF NOT EXISTS plot_arcs (
+    id TEXT PRIMARY KEY,
+    novel_id TEXT NOT NULL,
+    slug TEXT NOT NULL DEFAULT 'default',
+    display_name TEXT NOT NULL DEFAULT '',
+    extensions TEXT NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (novel_id) REFERENCES novels(id) ON DELETE CASCADE,
+    UNIQUE(novel_id, slug)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plot_arcs_novel ON plot_arcs(novel_id);
+CREATE INDEX IF NOT EXISTS idx_plot_arcs_novel_slug ON plot_arcs(novel_id, slug);
+
+CREATE TABLE IF NOT EXISTS plot_points (
+    id TEXT PRIMARY KEY,
+    plot_arc_id TEXT NOT NULL,
+    sort_order INTEGER NOT NULL,
+    chapter_number INTEGER NOT NULL,
+    point_type TEXT NOT NULL,
+    description TEXT NOT NULL,
+    tension INTEGER NOT NULL,
+    FOREIGN KEY (plot_arc_id) REFERENCES plot_arcs(id) ON DELETE CASCADE,
+    UNIQUE(plot_arc_id, chapter_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_plot_points_arc ON plot_points(plot_arc_id, sort_order);

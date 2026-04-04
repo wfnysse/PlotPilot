@@ -203,16 +203,13 @@ class DatabaseConnection:
 _db_instance: Optional[DatabaseConnection] = None
 
 
-def get_database(db_path: str = "data/aitext.db") -> DatabaseConnection:
-    """获取全局数据库实例
-
-    Args:
-        db_path: 数据库文件路径
-
-    Returns:
-        DatabaseConnection 实例
-    """
+def get_database(db_path: Optional[str] = None) -> DatabaseConnection:
+    """获取全局数据库实例（默认使用仓库内 data/aitext.db 绝对路径）。"""
     global _db_instance
     if _db_instance is None:
+        if db_path is None:
+            from application.paths import get_db_path
+
+            db_path = get_db_path()
         _db_instance = DatabaseConnection(db_path)
     return _db_instance
