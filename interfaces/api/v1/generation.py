@@ -79,6 +79,15 @@ class GhostAnnotationResponse(BaseModel):
     actual: Optional[str] = None
 
 
+class StyleWarningResponse(BaseModel):
+    """风格警告响应"""
+    pattern: str
+    text: str
+    start: int
+    end: int
+    severity: str
+
+
 class ConsistencyReportResponse(BaseModel):
     """一致性报告响应"""
     issues: List[ConsistencyIssueResponse]
@@ -92,6 +101,7 @@ class GenerateChapterResponse(BaseModel):
     consistency_report: ConsistencyReportResponse
     token_count: int
     ghost_annotations: List[GhostAnnotationResponse] = Field(default_factory=list, description="幽灵批注（冲突检测结果）")
+    style_warnings: List[StyleWarningResponse] = Field(default_factory=list, description="风格警告（俗套句式检测结果）")
 
 
 class StorylineResponse(BaseModel):
@@ -219,11 +229,24 @@ async def generate_chapter(
             for annotation in result.ghost_annotations
         ]
 
+        # 转换风格警告
+        style_warnings = [
+            StyleWarningResponse(
+                pattern=warning.pattern,
+                text=warning.text,
+                start=warning.start,
+                end=warning.end,
+                severity=warning.severity
+            )
+            for warning in result.style_warnings
+        ]
+
         logger.info(f"API 响应: 生成成功")
         logger.info(f"  内容长度: {len(result.content)} 字符")
         logger.info(f"  Token 数: {result.token_count}")
         logger.info(f"  问题数: {len(issues)}, 警告数: {len(warnings)}")
         logger.info(f"  幽灵批注数: {len(ghost_annotations)}")
+        logger.info(f"  风格警告数: {len(style_warnings)}")
 
         # 检查幕是否完成，自动创建下一幕
         try:
@@ -245,7 +268,8 @@ async def generate_chapter(
                 suggestions=result.consistency_report.suggestions
             ),
             token_count=result.token_count,
-            ghost_annotations=ghost_annotations
+            ghost_annotations=ghost_annotations,
+            style_warnings=style_warnings
         )
     except ValueError as e:
         logger.error(f"API 错误: 参数无效 - {e}")

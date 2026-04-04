@@ -8,6 +8,7 @@ from application.services.context_builder import ContextBuilder
 from application.services.state_extractor import StateExtractor
 from application.services.state_updater import StateUpdater
 from application.services.conflict_detection_service import ConflictDetectionService
+from application.services.style_constraint_builder import build_style_summary
 from application.dtos.generation_result import GenerationResult
 from application.dtos.scene_director_dto import SceneDirectorAnalysis
 from application.dtos.ghost_annotation import GhostAnnotation
@@ -73,7 +74,9 @@ class AutoNovelGenerationWorkflow:
         state_updater: Optional[StateUpdater] = None,
         bible_repository: Optional[BibleRepository] = None,
         foreshadowing_repository: Optional[ForeshadowingRepository] = None,
-        conflict_detection_service: Optional[ConflictDetectionService] = None
+        conflict_detection_service: Optional[ConflictDetectionService] = None,
+        voice_fingerprint_service: Optional['VoiceFingerprintService'] = None,
+        cliche_scanner: Optional['ClicheScanner'] = None
     ):
         """初始化工作流
 
@@ -88,6 +91,8 @@ class AutoNovelGenerationWorkflow:
             bible_repository: Bible 仓储（用于一致性检查，可选）
             foreshadowing_repository: Foreshadowing 仓储（用于一致性检查，可选）
             conflict_detection_service: 冲突检测服务（可选）
+            voice_fingerprint_service: 风格指纹服务（可选）
+            cliche_scanner: 俗套扫描器（可选）
         """
         self.context_builder = context_builder
         self.consistency_checker = consistency_checker
@@ -99,6 +104,8 @@ class AutoNovelGenerationWorkflow:
         self.bible_repository = bible_repository
         self.foreshadowing_repository = foreshadowing_repository
         self.conflict_detection_service = conflict_detection_service
+        self.voice_fingerprint_service = voice_fingerprint_service
+        self.cliche_scanner = cliche_scanner
 
     async def generate_chapter(
         self,
@@ -153,6 +160,11 @@ class AutoNovelGenerationWorkflow:
         context_tokens = payload['token_usage']['total']
         logger.info(f"  ✓ 上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
 
+        # Phase 2.5: Style Fingerprint - 获取风格指纹摘要（如果可用）
+        style_summary = self._get_style_summary(novel_id)
+        if style_summary:
+            logger.info(f"  ✓ 风格指纹摘要已加载: {len(style_summary)} 字符")
+
         # Phase 3: Generation - 调用 LLM
         logger.info("阶段 3: 生成 - 调用 LLM")
         prompt = self._build_prompt(
@@ -160,12 +172,18 @@ class AutoNovelGenerationWorkflow:
             outline,
             storyline_context=storyline_context,
             plot_tension=plot_tension,
+            style_summary=style_summary,
         )
         config = GenerationConfig()
         logger.info(f"  → 发送请求到 LLM (max_tokens={config.max_tokens}, temperature={config.temperature})")
         llm_result = await self.llm_service.generate(prompt, config)
         content = llm_result.content
         logger.info(f"  ✓ LLM 响应已接收: {len(content)} 字符")
+
+        # Phase 3.5: Cliche Scanning - 扫描俗套句式（如果可用）
+        style_warnings = self._scan_cliches(content)
+        if style_warnings:
+            logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
 
         # Phase 4: Post-Generation - 提取状态和检查一致性
         logger.info("阶段 4: 后处理 - 提取状态和检查一致性")
@@ -200,7 +218,8 @@ class AutoNovelGenerationWorkflow:
             consistency_report=consistency_report,
             context_used=context,
             token_count=token_count,
-            ghost_annotations=ghost_annotations
+            ghost_annotations=ghost_annotations,
+            style_warnings=style_warnings
         )
 
     async def generate_chapter_stream(
@@ -247,6 +266,11 @@ class AutoNovelGenerationWorkflow:
             context_tokens = payload['token_usage']['total']
             logger.info(f"  ✓ 上下文已构建: {len(context)} 字符, 约 {context_tokens} tokens")
 
+            # Phase 2.5: Style Fingerprint - 获取风格指纹摘要（如果可用）
+            style_summary = self._get_style_summary(novel_id)
+            if style_summary:
+                logger.info(f"  ✓ 风格指纹摘要已加载: {len(style_summary)} 字符")
+
             yield {"type": "phase", "phase": "llm"}
             logger.info("阶段 3: 生成 - 调用 LLM 流式生成")
             prompt = self._build_prompt(
@@ -254,6 +278,7 @@ class AutoNovelGenerationWorkflow:
                 outline,
                 storyline_context=storyline_context,
                 plot_tension=plot_tension,
+                style_summary=style_summary,
             )
             config = GenerationConfig()
             logger.info(f"  → 发送流式请求到 LLM")
@@ -271,6 +296,11 @@ class AutoNovelGenerationWorkflow:
                 logger.error("  × 模型返回空内容")
                 yield {"type": "error", "message": "模型返回空内容"}
                 return
+
+            # Phase 3.5: Cliche Scanning - 扫描俗套句式（如果可用）
+            style_warnings = self._scan_cliches(content)
+            if style_warnings:
+                logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
 
             yield {"type": "phase", "phase": "post"}
             logger.info("阶段 4: 后处理 - 提取状态和检查一致性")
@@ -303,6 +333,16 @@ class AutoNovelGenerationWorkflow:
                 "consistency_report": _consistency_report_to_dict(consistency_report),
                 "token_count": token_count,
                 "ghost_annotations": [ann.to_dict() for ann in ghost_annotations],
+                "style_warnings": [
+                    {
+                        "pattern": hit.pattern,
+                        "text": hit.text,
+                        "start": hit.start,
+                        "end": hit.end,
+                        "severity": hit.severity,
+                    }
+                    for hit in style_warnings
+                ],
             }
         except ValueError as e:
             logger.error(f"参数错误: {e}")
@@ -429,6 +469,7 @@ class AutoNovelGenerationWorkflow:
         *,
         storyline_context: str = "",
         plot_tension: str = "",
+        style_summary: str = "",
     ) -> Prompt:
         """构建 LLM 提示词
 
@@ -437,17 +478,21 @@ class AutoNovelGenerationWorkflow:
             outline: 章节大纲
             storyline_context: 当前章相关故事线与里程碑（Phase 1）
             plot_tension: 情节弧期望张力与下一锚点（Phase 1）
+            style_summary: 风格指纹摘要（Phase 2.5）
 
         Returns:
             Prompt 对象
         """
         sc = (storyline_context or "").strip()
         pt = (plot_tension or "").strip()
+        ss = (style_summary or "").strip()
         planning_parts: list[str] = []
         if sc and sc not in ("Storyline context unavailable",):
             planning_parts.append(f"【故事线 / 里程碑】\n{sc}")
         if pt and pt not in ("Plot tension unavailable",):
             planning_parts.append(f"【情节节奏 / 期望张力】\n{pt}")
+        if ss:
+            planning_parts.append(f"【风格约束】\n{ss}")
         planning_section = ""
         if planning_parts:
             planning_section = (
@@ -700,3 +745,49 @@ class AutoNovelGenerationWorkflow:
             logger.warning(f"Failed to get entity states: {e}")
 
         return entity_states
+
+    def _get_style_summary(self, novel_id: str) -> str:
+        """获取风格指纹摘要
+
+        Args:
+            novel_id: 小说 ID
+
+        Returns:
+            风格指纹摘要字符串，如果不可用则返回空字符串
+        """
+        if not self.voice_fingerprint_service:
+            return ""
+
+        try:
+            # 获取指纹数据
+            fingerprint = self.voice_fingerprint_service.fingerprint_repo.get_by_novel(
+                novel_id, pov_character_id=None
+            )
+            if not fingerprint:
+                return ""
+
+            # 构建摘要
+            summary = build_style_summary(fingerprint)
+            return summary
+
+        except Exception as e:
+            logger.warning(f"Failed to get style summary: {e}")
+            return ""
+
+    def _scan_cliches(self, content: str) -> List['ClicheHit']:
+        """扫描俗套句式
+
+        Args:
+            content: 生成的内容
+
+        Returns:
+            俗套句式列表，如果扫描器不可用则返回空列表
+        """
+        if not self.cliche_scanner:
+            return []
+
+        try:
+            return self.cliche_scanner.scan_cliches(content)
+        except Exception as e:
+            logger.warning(f"Failed to scan cliches: {e}")
+            return []

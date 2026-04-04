@@ -443,3 +443,186 @@ class TestConflictDetectionIntegration:
         assert len(done_event["ghost_annotations"]) == 1
         assert done_event["ghost_annotations"][0]["type"] == "setting_conflict"
         assert done_event["ghost_annotations"][0]["message"] == "测试批注"
+
+
+class TestStyleIntegration:
+    """测试风格指纹和俗套扫描集成"""
+
+    @pytest.mark.asyncio
+    async def test_generate_chapter_includes_style_warnings(
+        self,
+        mock_context_builder,
+        mock_consistency_checker,
+        mock_storyline_manager,
+        mock_plot_arc_repository,
+        mock_llm_service
+    ):
+        """测试生成章节时包含风格警告"""
+        from application.services.cliche_scanner import ClicheScanner, ClicheHit
+
+        # Mock ClicheScanner
+        mock_scanner = Mock(spec=ClicheScanner)
+        mock_scanner.scan_cliches.return_value = [
+            ClicheHit(
+                pattern="熊熊系列",
+                text="熊熊烈火",
+                start=10,
+                end=14,
+                severity="warning"
+            ),
+            ClicheHit(
+                pattern="眼神闪过系列",
+                text="眼中闪过一丝",
+                start=50,
+                end=57,
+                severity="warning"
+            )
+        ]
+
+        # 创建带俗套扫描的工作流
+        workflow = AutoNovelGenerationWorkflow(
+            context_builder=mock_context_builder,
+            consistency_checker=mock_consistency_checker,
+            storyline_manager=mock_storyline_manager,
+            plot_arc_repository=mock_plot_arc_repository,
+            llm_service=mock_llm_service,
+            cliche_scanner=mock_scanner
+        )
+
+        result = await workflow.generate_chapter(
+            novel_id="novel-1",
+            chapter_number=1,
+            outline="测试大纲"
+        )
+
+        # 验证返回结果包含风格警告
+        assert isinstance(result, GenerationResult)
+        assert len(result.style_warnings) == 2
+        assert result.style_warnings[0].pattern == "熊熊系列"
+        assert result.style_warnings[0].text == "熊熊烈火"
+        assert result.style_warnings[1].pattern == "眼神闪过系列"
+
+        # 验证扫描器被调用
+        mock_scanner.scan_cliches.assert_called_once_with("Generated chapter content")
+
+    @pytest.mark.asyncio
+    async def test_generate_chapter_injects_fingerprint_summary(
+        self,
+        mock_context_builder,
+        mock_consistency_checker,
+        mock_storyline_manager,
+        mock_plot_arc_repository,
+        mock_llm_service
+    ):
+        """测试生成章节时注入风格指纹摘要"""
+        from application.services.voice_fingerprint_service import VoiceFingerprintService
+        from domain.novel.repositories.voice_fingerprint_repository import VoiceFingerprintRepository
+
+        # Mock VoiceFingerprintService
+        mock_fingerprint_repo = Mock(spec=VoiceFingerprintRepository)
+        mock_fingerprint_repo.get_by_novel.return_value = {
+            "metrics": {
+                "adjective_density": 0.052,
+                "avg_sentence_length": 18.5,
+                "sentence_count": 100
+            },
+            "sample_count": 10
+        }
+
+        mock_fingerprint_service = Mock(spec=VoiceFingerprintService)
+        mock_fingerprint_service.fingerprint_repo = mock_fingerprint_repo
+
+        # 创建带风格指纹的工作流
+        workflow = AutoNovelGenerationWorkflow(
+            context_builder=mock_context_builder,
+            consistency_checker=mock_consistency_checker,
+            storyline_manager=mock_storyline_manager,
+            plot_arc_repository=mock_plot_arc_repository,
+            llm_service=mock_llm_service,
+            voice_fingerprint_service=mock_fingerprint_service
+        )
+
+        result = await workflow.generate_chapter(
+            novel_id="novel-1",
+            chapter_number=1,
+            outline="测试大纲"
+        )
+
+        # 验证 LLM 被调用
+        assert mock_llm_service.generate.called
+
+        # 获取传递给 LLM 的 prompt
+        call_args = mock_llm_service.generate.call_args
+        prompt = call_args[0][0]
+
+        # 验证 prompt 包含风格指纹摘要
+        assert "形容词密度" in prompt.system or "平均句长" in prompt.system
+
+        # 验证指纹仓储被调用
+        mock_fingerprint_repo.get_by_novel.assert_called_once_with("novel-1", pov_character_id=None)
+
+    @pytest.mark.asyncio
+    async def test_generate_chapter_without_style_services(
+        self,
+        workflow
+    ):
+        """测试没有风格服务时不报错"""
+        # workflow fixture 默认没有 voice_fingerprint_service 和 cliche_scanner
+        result = await workflow.generate_chapter(
+            novel_id="novel-1",
+            chapter_number=1,
+            outline="测试大纲"
+        )
+
+        # 验证不报错，返回空风格警告列表
+        assert isinstance(result, GenerationResult)
+        assert len(result.style_warnings) == 0
+
+    @pytest.mark.asyncio
+    async def test_generate_chapter_stream_includes_style_warnings(
+        self,
+        mock_context_builder,
+        mock_consistency_checker,
+        mock_storyline_manager,
+        mock_plot_arc_repository,
+        mock_llm_service
+    ):
+        """测试流式生成时包含风格警告"""
+        from application.services.cliche_scanner import ClicheScanner, ClicheHit
+
+        # Mock ClicheScanner
+        mock_scanner = Mock(spec=ClicheScanner)
+        mock_scanner.scan_cliches.return_value = [
+            ClicheHit(
+                pattern="熊熊系列",
+                text="熊熊烈火",
+                start=10,
+                end=14,
+                severity="warning"
+            )
+        ]
+
+        workflow = AutoNovelGenerationWorkflow(
+            context_builder=mock_context_builder,
+            consistency_checker=mock_consistency_checker,
+            storyline_manager=mock_storyline_manager,
+            plot_arc_repository=mock_plot_arc_repository,
+            llm_service=mock_llm_service,
+            cliche_scanner=mock_scanner
+        )
+
+        events = []
+        async for event in workflow.generate_chapter_stream(
+            novel_id="novel-1",
+            chapter_number=1,
+            outline="测试大纲"
+        ):
+            events.append(event)
+
+        # 验证最后的 done 事件包含风格警告
+        done_event = events[-1]
+        assert done_event["type"] == "done"
+        assert "style_warnings" in done_event
+        assert len(done_event["style_warnings"]) == 1
+        assert done_event["style_warnings"][0]["pattern"] == "熊熊系列"
+        assert done_event["style_warnings"][0]["text"] == "熊熊烈火"
