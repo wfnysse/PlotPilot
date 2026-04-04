@@ -129,23 +129,29 @@ const handleBack = () => {
 }
 
 // AI 初始规划
-const handlePlanNovel = async () => {
+// Naive Dialog：onPositiveClick 若返回 rejected Promise 则不会关闭弹层（仅有 .then 无 .catch）。
+// 故先 return true 关弹层，再在后台跑长任务；loading 仍由 planning 绑在按钮上。
+const handlePlanNovel = () => {
   dialog.warning({
     title: 'AI 初始规划',
     content: '将使用 AI 生成初始 Bible（世界设定）和章节大纲。此操作可能需要 1-2 分钟，确认继续？',
     positiveText: '确认',
     negativeText: '取消',
-    onPositiveClick: async () => {
+    onPositiveClick: () => {
       planning.value = true
-      try {
-        const res = await workflowApi.planNovel(props.slug, 'initial', false)
-        message.success(res.message || 'AI 规划完成')
-        emit('refresh')
-      } catch (e: any) {
-        message.error(e?.response?.data?.detail || 'AI 规划失败，请确认 API Key 已配置')
-      } finally {
-        planning.value = false
-      }
+      void (async () => {
+        try {
+          const res = await workflowApi.planNovel(props.slug, 'initial', false)
+          message.success(res.message || 'AI 规划完成')
+          emit('refresh')
+        } catch (e: unknown) {
+          const err = e as { response?: { data?: { detail?: string } } }
+          message.error(err?.response?.data?.detail || 'AI 规划失败，请确认 API Key 已配置')
+        } finally {
+          planning.value = false
+        }
+      })()
+      return true
     }
   })
 }
@@ -161,17 +167,21 @@ const handleExtendOutline = () => {
     content: `将从第 ${fromChapter} 章开始续写大纲，默认生成 5 章（可在后续版本中自定义数量）`,
     positiveText: '开始续写',
     negativeText: '取消',
-    onPositiveClick: async () => {
+    onPositiveClick: () => {
       extending.value = true
-      try {
-        const res = await workflowApi.extendOutline(props.slug, fromChapter, extendCount.value)
-        message.success(`成功生成 ${res.chapters_added} 章大纲`)
-        emit('refresh')
-      } catch (e: any) {
-        message.error(e?.response?.data?.detail || '续写大纲失败，请确认 API Key 已配置')
-      } finally {
-        extending.value = false
-      }
+      void (async () => {
+        try {
+          const res = await workflowApi.extendOutline(props.slug, fromChapter, extendCount.value)
+          message.success(`成功生成 ${res.chapters_added} 章大纲`)
+          emit('refresh')
+        } catch (e: unknown) {
+          const err = e as { response?: { data?: { detail?: string } } }
+          message.error(err?.response?.data?.detail || '续写大纲失败，请确认 API Key 已配置')
+        } finally {
+          extending.value = false
+        }
+      })()
+      return true
     }
   })
 }
