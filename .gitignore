@@ -25,3 +25,10 @@ data/bibles/bible-final-*.json
 
 # Temporary data
 interfaces/data/
+
+# Runtime foreshadowing JSON under data/ (do not commit)
+data/foreshadowings/
+
+# Local agent / MCP caches (do not commit)
+.playwright-mcp/
+.claude/
