@@ -8,16 +8,15 @@
     title="完整工作流撰稿"
   >
     <template #header-extra>
-      <n-text depth="3" style="font-size: 12px">上下文 + 流式 + 一致性 · 单章 / 托管连写</n-text>
+      <n-text depth="3" style="font-size: 12px">上下文 + 流式 + 一致性检验</n-text>
     </template>
 
-    <n-tabs v-model:value="mainTab" type="line" size="small" class="gwm-tabs">
-      <n-tab-pane name="single" tab="单章撰稿">
-        <n-space vertical :size="14" class="gwm-body">
-          <n-alert v-if="!result" type="info" :show-icon="true" class="gwm-intro">
-            与侧栏「对话」互补：对话负责多轮讨论与工具编排；此处按大纲生成整章、流式展示、一致性校验后保存到章节。
-          </n-alert>
-          <n-form-item label="章节" :show-feedback="false">
+    <n-alert v-if="!result" type="info" :show-icon="true" class="gwm-intro">
+      与侧栏「对话」互补：对话负责多轮讨论与工具编排；此处按大纲生成整章、流式展示、一致性校验后保存到章节。
+    </n-alert>
+
+    <n-space vertical :size="14" class="gwm-body">
+      <n-form-item label="章节" :show-feedback="false">
             <n-select
               v-model:value="chapterNumber"
               :options="chapterOptions"
@@ -114,66 +113,7 @@
               <n-button type="primary" :loading="saving" @click="saveToChapter">保存到章节</n-button>
             </n-space>
           </template>
-        </n-space>
-      </n-tab-pane>
-
-      <n-tab-pane name="hosted" tab="托管连写">
-        <n-space vertical :size="14" class="gwm-body">
-          <n-alert type="warning" :show-icon="true" class="gwm-intro">
-            全自动区间：每章先用模型生成要点大纲（可关则用语义模板），再按章流式正文；上下文由后端
-            ContextBuilder 维护。请确保章号已在书中存在，否则无法自动保存。
-          </n-alert>
-          <n-form-item label="章区间（含端点）" :show-feedback="false">
-            <n-space align="center" :size="12" wrap>
-              <n-input-number
-                v-model:value="hostedFrom"
-                :min="1"
-                :disabled="hostedRunning"
-                placeholder="起"
-              />
-              <span>—</span>
-              <n-input-number
-                v-model:value="hostedTo"
-                :min="1"
-                :disabled="hostedRunning"
-                placeholder="止"
-              />
-            </n-space>
-          </n-form-item>
-          <n-form-item :show-feedback="false">
-            <n-space vertical :size="8">
-              <n-space align="center" :size="12">
-                <n-switch v-model:value="hostedAutoOutline" :disabled="hostedRunning" />
-                <n-text depth="3">自动大纲（LLM 要点，推荐）</n-text>
-              </n-space>
-              <n-space align="center" :size="12">
-                <n-switch v-model:value="hostedAutoSave" :disabled="hostedRunning" />
-                <n-text depth="3">每章生成后写入章节正文</n-text>
-              </n-space>
-            </n-space>
-          </n-form-item>
-
-          <n-text depth="3">当前章正文预览</n-text>
-          <n-input
-            v-model:value="hostedPreview"
-            type="textarea"
-            readonly
-            placeholder="托管运行中，本章流式正文会出现在此…"
-            :autosize="{ minRows: 6, maxRows: 16 }"
-          />
-          <n-text depth="3">事件日志</n-text>
-          <n-input v-model:value="hostedLog" type="textarea" readonly :autosize="{ minRows: 6, maxRows: 12 }" />
-
-          <n-space justify="end" :size="10" wrap>
-            <n-button @click="close" :disabled="hostedRunning">关闭</n-button>
-            <n-button secondary :disabled="!hostedRunning" @click="stopHosted">停止</n-button>
-            <n-button type="primary" :loading="hostedRunning" :disabled="hostedRunning" @click="runHosted">
-              开始托管
-            </n-button>
-          </n-space>
-        </n-space>
-      </n-tab-pane>
-    </n-tabs>
+    </n-space>
   </n-modal>
 </template>
 
@@ -183,54 +123,11 @@ import { useMessage, useDialog } from 'naive-ui'
 import {
   workflowApi,
   consumeGenerateChapterStream,
-  consumeHostedWriteStream,
   analyzeScene,
   type GenerateChapterWorkflowResponse,
 } from '../../api/workflow'
 import { chapterApi } from '../../api/chapter'
-import { planningApi } from '../../api/planning'
 import ConsistencyReportPanel from './ConsistencyReportPanel.vue'
-
-const PHASE_LABEL: Record<string, string> = {
-  session: '会话初始化',
-  chapter_start: '开始新章节',
-  outline: '生成大纲',
-  planning: '故事线规划',
-  context: '构建上下文',
-  llm: '模型正在生成',
-  post: '一致性检查',
-  done: '章节完成',
-  saved: '保存章节',
-  session_done: '所有章节完成',
-  error: '发生错误',
-}
-
-function formatHostedEvent(o: Record<string, unknown>): string {
-  const t = String(o.type ?? '')
-  const label = PHASE_LABEL[t] ?? t
-  const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-
-  switch (t) {
-    case 'chapter_start':
-      return `\n[${ts}] ▶ 第 ${o.chapter} 章 (${o.index}/${o.total})`
-    case 'outline':
-      return `  大纲: ${String(o.text ?? '').slice(0, 120)}`
-    case 'phase':
-      return `  → ${PHASE_LABEL[String(o.phase ?? '')] ?? o.phase}`
-    case 'done':
-      return `  ✓ 生成完成 ${typeof o.content === 'string' ? o.content.length : 0} 字`
-    case 'saved':
-      return o.ok
-        ? `  💾 已保存${o.created ? '（新建）' : ''}`
-        : `  ✗ 保存失败: ${o.message}`
-    case 'session_done':
-      return `\n[${ts}] ✅ 全部 ${o.total} 章生成完毕`
-    case 'error':
-      return `\n[${ts}] ❌ ${o.message}`
-    default:
-      return `  [${label}]`
-  }
-}
 
 export interface ChapterOption {
   id: number
@@ -247,7 +144,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'update:show', v: boolean): void
   (e: 'saved'): void
-  (e: 'plan-act', actId: string, actTitle: string): void
 }>()
 
 const message = useMessage()
@@ -257,8 +153,6 @@ const show = computed({
   get: () => props.show,
   set: (v: boolean) => emit('update:show', v),
 })
-
-const mainTab = ref<'single' | 'hosted'>('single')
 
 const chapterNumber = ref<number | null>(null)
 const outline = ref('')
@@ -293,15 +187,6 @@ async function autoAnalyzeScene() {
   }
 }
 
-const hostedFrom = ref<number | null>(1)
-const hostedTo = ref<number | null>(1)
-const hostedAutoOutline = ref(true)
-const hostedAutoSave = ref(true)
-const hostedRunning = ref(false)
-const hostedLog = ref('')
-const hostedPreview = ref('')
-let hostedAbort: AbortController | null = null
-
 const chapterOptions = computed(() =>
   props.chapters.map(c => ({
     label: `第${c.id}章 ${c.title ? c.title.slice(0, 16) : ''}`,
@@ -316,8 +201,6 @@ watch(
     const ch = props.chapters
     if (!ch.length) {
       chapterNumber.value = null
-      hostedFrom.value = 1
-      hostedTo.value = 1
       return
     }
     const def = props.defaultChapterId
@@ -326,9 +209,6 @@ watch(
     } else if (chapterNumber.value == null || !ch.some(x => x.id === chapterNumber.value)) {
       chapterNumber.value = ch[0].id
     }
-    const ids = ch.map(c => c.id).sort((a, b) => a - b)
-    hostedFrom.value = ids[0]
-    hostedTo.value = ids[ids.length - 1]
   },
   { immediate: true }
 )
@@ -346,18 +226,12 @@ watch(
       outline.value = ''
       streamProgress.value = 0
       phaseLabel.value = ''
-      mainTab.value = 'single'
-      hostedAbort?.abort()
-      hostedAbort = null
-      hostedRunning.value = false
-      hostedLog.value = ''
-      hostedPreview.value = ''
     }
   }
 )
 
 function close() {
-  if (generating.value || hostedRunning.value) {
+  if (generating.value) {
     dialog.warning({
       title: '确认关闭',
       content: '当前仍有生成任务进行中，关闭后将中断。确定关闭？',
@@ -365,14 +239,12 @@ function close() {
       negativeText: '继续等待',
       onPositiveClick: () => {
         streamAbort?.abort()
-        hostedAbort?.abort()
         emit('update:show', false)
       },
     })
     return
   }
   streamAbort?.abort()
-  hostedAbort?.abort()
   emit('update:show', false)
 }
 
@@ -400,73 +272,6 @@ function stopStream() {
   streamAbort = null
   generating.value = false
   phaseLabel.value = '已停止'
-}
-
-function stopHosted() {
-  hostedAbort?.abort()
-  hostedAbort = null
-  hostedRunning.value = false
-  message.info('已请求停止（当前章结束后不再续写）')
-}
-
-function appendHostedLog(line: string) {
-  const next = (hostedLog.value + line + '\n').slice(-8000)
-  hostedLog.value = next
-}
-
-async function runHosted() {
-  const a = hostedFrom.value
-  const b = hostedTo.value
-  if (a == null || b == null) {
-    message.warning('请填写章区间')
-    return
-  }
-  if (b < a) {
-    message.warning('结束章不能小于起始章')
-    return
-  }
-  hostedRunning.value = true
-  hostedLog.value = ''
-  hostedPreview.value = ''
-  hostedAbort = new AbortController()
-  let currentChapter: number | null = null
-
-  await consumeHostedWriteStream(
-    props.slug,
-    {
-      from_chapter: a,
-      to_chapter: b,
-      auto_save: hostedAutoSave.value,
-      auto_outline: hostedAutoOutline.value,
-    },
-    {
-      signal: hostedAbort.signal,
-      onEvent: o => {
-        appendHostedLog(formatHostedEvent(o as Record<string, unknown>))
-        const t = o.type as string
-        if (t === 'chapter_start') {
-          currentChapter = Number(o.chapter ?? 0)
-          hostedPreview.value = ''
-        }
-        if (t === 'chunk' && o.chapter != null) {
-          if (currentChapter !== Number(o.chapter)) {
-            currentChapter = Number(o.chapter)
-            hostedPreview.value = ''
-          }
-          hostedPreview.value += String(o.text ?? '')
-        }
-        if (t === 'session_done') {
-          message.success('托管区间已完成')
-          emit('saved')
-        }
-      },
-      onError: msg => {
-        message.error(msg || '托管失败')
-      },
-    }
-  )
-  hostedAbort = null
-  hostedRunning.value = false
 }
 
 async function runGenerate() {
@@ -557,61 +362,11 @@ async function saveToChapter() {
     result.value = null
     editedContent.value = ''
     outline.value = ''
-
-    // AI 续规划：判断当前幕是否完成
-    await checkActCompletion(n)
   } catch (e: unknown) {
     const err = e as { response?: { data?: { detail?: string } }; message?: string }
     saveError.value = err.response?.data?.detail || err.message || '保存失败'
   } finally {
     saving.value = false
-  }
-}
-
-// AI 续规划：检查幕是否完成
-async function checkActCompletion(chapterNumber: number) {
-  try {
-    const result = await planningApi.continuePlanning(props.slug, {
-      current_chapter: chapterNumber
-    })
-
-    if (result.act_completed) {
-      if (result.has_next_act) {
-        // 已有下一幕
-        message.success(`${result.message}`)
-      } else if (result.suggest_create_next) {
-        // 询问是否创建新幕
-        dialog.info({
-          title: '幕已完成',
-          content: result.message,
-          positiveText: '创建下一幕',
-          negativeText: '稍后再说',
-          onPositiveClick: async () => {
-            try {
-              const nextAct = await planningApi.createNextAct(result.current_act.id)
-              message.success(`已创建${nextAct.next_act.title}`)
-
-              // 询问是否立即规划章节
-              dialog.info({
-                title: '规划章节',
-                content: `是否为《${nextAct.next_act.title}》规划章节？`,
-                positiveText: '立即规划',
-                negativeText: '稍后再说',
-                onPositiveClick: () => {
-                  // 通知父组件打开幕级规划弹窗
-                  emit('plan-act', nextAct.next_act.id, nextAct.next_act.title)
-                }
-              })
-            } catch (e: any) {
-              message.error(e?.response?.data?.detail || '创建下一幕失败')
-            }
-          }
-        })
-      }
-    }
-  } catch (e: any) {
-    // 续规划失败不影响主流程，只记录日志
-    console.error('AI 续规划失败:', e)
   }
 }
 
@@ -626,9 +381,6 @@ function onLocationClick(location: number) {
 }
 .gwm-intro {
   font-size: 13px;
-}
-.gwm-tabs :deep(.n-tabs-nav) {
-  margin-bottom: 8px;
 }
 .cliche-collapse {
   margin: 4px 0;
