@@ -110,6 +110,7 @@
               :read-only="isAssistedReadOnly"
               :last-workflow-result="lastWorkflowResult"
               :qc-chapter-number="lastQcChapterNumber"
+              :autopilot-chapter-review="autopilotChapterReview"
               @clear-qc="clearWorkflowQc"
               @go-editor="activeTab = 'editor'"
             />
@@ -123,6 +124,7 @@
                 :read-only="isAssistedReadOnly"
                 :last-workflow-result="lastWorkflowResult"
                 :qc-chapter-number="lastQcChapterNumber"
+                :autopilot-chapter-review="autopilotChapterReview"
               />
             </div>
           </n-tab-pane>
@@ -500,6 +502,8 @@ const streamProgressPct = ref(0)
 // Autopilot 状态
 const autopilotStatus = ref<any>(null)
 const isAutopilotRunning = computed(() => autopilotStatus.value?.autopilot_status === 'running')
+/** 守护进程章末审阅快照（与 /autopilot/status 同源） */
+const autopilotChapterReview = computed(() => autopilotStatus.value?.last_chapter_audit ?? null)
 
 /** 在辅助撰稿且全托管运行中：只读，不可改稿与生成 */
 const isAssistedReadOnly = computed(

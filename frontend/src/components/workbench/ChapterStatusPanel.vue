@@ -25,6 +25,55 @@
       </n-text>
 
       <n-card
+        v-if="autopilotChapterReview"
+        title="全托管 · 章末审阅"
+        size="small"
+        :bordered="false"
+      >
+        <n-descriptions :column="1" label-placement="left" size="small">
+          <n-descriptions-item label="审阅章号">
+            第 {{ autopilotChapterReview.chapter_number }} 章
+            <n-tag
+              v-if="chapter && chapter.number !== autopilotChapterReview.chapter_number"
+              size="tiny"
+              type="info"
+              style="margin-left: 6px"
+            >
+              当前浏览为第 {{ chapter.number }} 章
+            </n-tag>
+          </n-descriptions-item>
+          <n-descriptions-item label="张力（1–10）">{{ autopilotChapterReview.tension }}</n-descriptions-item>
+          <n-descriptions-item label="叙事管线">
+            <n-tag
+              :type="autopilotChapterReview.narrative_sync_ok ? 'success' : 'warning'"
+              size="small"
+              round
+            >
+              {{ autopilotChapterReview.narrative_sync_ok ? '摘要/向量/伏笔已落库' : '同步失败或降级' }}
+            </n-tag>
+          </n-descriptions-item>
+          <n-descriptions-item label="文风相似度">
+            {{
+              autopilotChapterReview.similarity_score != null
+                ? Number(autopilotChapterReview.similarity_score).toFixed(3)
+                : '—'
+            }}
+          </n-descriptions-item>
+          <n-descriptions-item label="漂移告警">
+            <n-tag :type="autopilotChapterReview.drift_alert ? 'error' : 'success'" size="small" round>
+              {{ autopilotChapterReview.drift_alert ? '是（可能已触发删章重写）' : '否' }}
+            </n-tag>
+          </n-descriptions-item>
+          <n-descriptions-item v-if="autopilotChapterReview.at" label="审阅时间">
+            {{ autopilotChapterReview.at }}
+          </n-descriptions-item>
+        </n-descriptions>
+        <n-text depth="3" style="font-size: 11px; display: block; margin-top: 8px">
+          与守护进程 AUDITING 阶段一致：章后管线含叙事同步、文风、图谱推断与伏笔/三元组落库。
+        </n-text>
+      </n-card>
+
+      <n-card
         v-if="lastWorkflowResult && qcChapterNumber != null"
         title="AI 生成质检"
         size="small"
@@ -93,11 +142,22 @@ interface Chapter {
   word_count: number
 }
 
+export interface AutopilotChapterAudit {
+  chapter_number: number
+  tension: number
+  drift_alert: boolean
+  similarity_score: number | null
+  narrative_sync_ok: boolean
+  at: string | null
+}
+
 defineProps<{
   chapter: Chapter | null
   readOnly?: boolean
   lastWorkflowResult?: GenerateChapterWorkflowResponse | null
   qcChapterNumber?: number | null
+  /** 全托管章末审阅（与 /autopilot/status.last_chapter_audit 同源） */
+  autopilotChapterReview?: AutopilotChapterAudit | null
 }>()
 
 defineEmits<{

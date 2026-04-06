@@ -9,6 +9,46 @@
             托管运行中：仅可查看，不可增删元素关联。
           </n-alert>
 
+          <n-card
+            v-if="autopilotChapterReview && currentChapterNumber === autopilotChapterReview.chapter_number"
+            title="全托管 · 本章管线摘要"
+            size="small"
+            :bordered="true"
+          >
+            <n-space vertical :size="6">
+              <n-text depth="3" style="font-size: 12px">
+                与「📋 章节状态」审阅同源：结构树元素关联仍以下方列表为准；管线侧已写入叙事知识、向量检索、三元组与伏笔账本（右栏可刷新查看）。
+              </n-text>
+              <n-descriptions :column="1" label-placement="left" size="small">
+                <n-descriptions-item label="张力">{{ autopilotChapterReview.tension }} / 10</n-descriptions-item>
+                <n-descriptions-item label="叙事同步">
+                  <n-tag
+                    :type="autopilotChapterReview.narrative_sync_ok ? 'success' : 'warning'"
+                    size="tiny"
+                    round
+                  >
+                    {{ autopilotChapterReview.narrative_sync_ok ? '已落库' : '异常' }}
+                  </n-tag>
+                </n-descriptions-item>
+                <n-descriptions-item label="文风">
+                  {{
+                    autopilotChapterReview.similarity_score != null
+                      ? Number(autopilotChapterReview.similarity_score).toFixed(3)
+                      : '—'
+                  }}
+                  ·
+                  <n-tag
+                    :type="autopilotChapterReview.drift_alert ? 'error' : 'default'"
+                    size="tiny"
+                    round
+                  >
+                    {{ autopilotChapterReview.drift_alert ? '漂移告警' : '正常' }}
+                  </n-tag>
+                </n-descriptions-item>
+              </n-descriptions>
+            </n-space>
+          </n-card>
+
           <!-- 本章规划（结构树节点：节拍/大纲/视角等） -->
           <n-card v-if="chapterPlan" title="本章规划（结构树）" size="small" :bordered="true">
             <n-space vertical :size="8">
@@ -254,12 +294,15 @@
 
 <script setup lang="ts">
 import { ref, watch, onMounted, computed } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
 import { useMessage } from 'naive-ui'
 import { chapterElementApi } from '../../api/chapterElement'
 import type { ChapterElementDTO, ElementType, RelationType, Importance } from '../../api/chapterElement'
 import { planningApi } from '../../api/planning'
 import type { StoryNode } from '../../api/planning'
 import type { GenerateChapterWorkflowResponse } from '../../api/workflow'
+import type { AutopilotChapterAudit } from './ChapterStatusPanel.vue'
 import ForeshadowChapterSuggestionsPanel from './ForeshadowChapterSuggestionsPanel.vue'
 import ConsistencyReportPanel from './ConsistencyReportPanel.vue'
 
@@ -272,8 +315,15 @@ const props = withDefaults(
     /** 与章节状态 Tab 一致的最近一次生成质检（可选展示） */
     lastWorkflowResult?: GenerateChapterWorkflowResponse | null
     qcChapterNumber?: number | null
+    autopilotChapterReview?: AutopilotChapterAudit | null
   }>(),
-  { currentChapterNumber: null, readOnly: false, lastWorkflowResult: null, qcChapterNumber: null }
+  {
+    currentChapterNumber: null,
+    readOnly: false,
+    lastWorkflowResult: null,
+    qcChapterNumber: null,
+    autopilotChapterReview: null,
+  }
 )
 
 const message = useMessage()
@@ -447,6 +497,13 @@ watch(() => props.currentChapterNumber, async () => {
   await resolveStoryNode()
   await loadElements()
 }, { immediate: false })
+
+const refreshStore = useWorkbenchRefreshStore()
+const { deskTick } = storeToRefs(refreshStore)
+watch(deskTick, async () => {
+  await resolveStoryNode()
+  await loadElements()
+})
 
 onMounted(async () => {
   await resolveStoryNode()

@@ -149,6 +149,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
 import { useMessage } from 'naive-ui'
 import { sandboxApi } from '../../api/sandbox'
 import type { DialogueWhitelistResponse, DialogueEntry, CharacterAnchor } from '../../api/sandbox'
@@ -268,6 +270,15 @@ const loadWhitelist = async () => {
     loading.value = false
   }
 }
+
+const refreshStore = useWorkbenchRefreshStore()
+const { deskTick } = storeToRefs(refreshStore)
+watch(deskTick, async () => {
+  await loadCharacters()
+  if (result.value !== null) {
+    await loadWhitelist()
+  }
+})
 </script>
 
 <style scoped>

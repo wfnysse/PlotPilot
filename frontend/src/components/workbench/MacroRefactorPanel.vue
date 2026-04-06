@@ -16,6 +16,17 @@
       当前 Step1–2 为人设冲突断点 + 提案；全书剧情 Bug 扫描可在同一弹层内扩展为左侧列表、右侧修复稿形态。
     </n-alert>
 
+    <n-alert
+      v-if="macroDeskStale"
+      type="info"
+      :show-icon="true"
+      closable
+      style="margin: 0 16px 12px; font-size: 12px"
+      @close="macroDeskStale = false"
+    >
+      检测到工作台已因<strong>新章节落库</strong>刷新：叙事事件与章节范围可能已变化。若需最新断点，请重新执行 Step1 扫描。
+    </n-alert>
+
     <!-- Step 1：扫描断点 -->
     <div class="step-block">
       <div class="step-title">
@@ -172,7 +183,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
 import { useMessage } from 'naive-ui'
 import { macroRefactorApi } from '../../api/tools'
 import type { LogicBreakpoint, RefactorProposal, ApplyMutationResponse } from '../../api/tools'
@@ -180,6 +193,13 @@ import type { LogicBreakpoint, RefactorProposal, ApplyMutationResponse } from '.
 interface Props { slug: string }
 const props = defineProps<Props>()
 const message = useMessage()
+
+const macroDeskStale = ref(false)
+const refreshStore = useWorkbenchRefreshStore()
+const { deskTick } = storeToRefs(refreshStore)
+watch(deskTick, () => {
+  macroDeskStale.value = true
+})
 
 // Step 1 — 扫描
 const scanTrait = ref('')
@@ -206,6 +226,7 @@ const doScan = async () => {
     scanned.value = true
     if (breakpoints.value.length === 0) message.success('未发现冲突断点')
     else message.warning(`发现 ${breakpoints.value.length} 个冲突断点`)
+    macroDeskStale.value = false
   } catch {
     message.error('扫描失败')
   } finally {

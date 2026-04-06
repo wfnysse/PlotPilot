@@ -387,6 +387,8 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
 import { useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { PeopleOutline, LocationOutline } from '@vicons/ionicons5'
@@ -709,6 +711,13 @@ watch(
     void load()
   }
 )
+
+const refreshStore = useWorkbenchRefreshStore()
+const { deskTick } = storeToRefs(refreshStore)
+watch(deskTick, () => {
+  void load()
+  void loadTriples()
+})
 
 function onKnowledgeReloadFromOutside() {
   void load()

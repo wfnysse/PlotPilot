@@ -102,6 +102,8 @@
 
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
+import { storeToRefs } from 'pinia'
+import { useWorkbenchRefreshStore } from '../../stores/workbenchRefreshStore'
 import { workflowApi } from '../../api/workflow'
 import type { StorylineDTO, PlotArcDTO, PlotPointDTO } from '../../api/workflow'
 import StorylinePanel from './StorylinePanel.vue'
@@ -198,6 +200,10 @@ async function load() {
 }
 
 watch(() => props.slug, () => void load(), { immediate: true })
+
+const refreshStore = useWorkbenchRefreshStore()
+const { deskTick } = storeToRefs(refreshStore)
+watch(deskTick, () => void load())
 </script>
 
 <style scoped>
