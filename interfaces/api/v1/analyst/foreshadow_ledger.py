@@ -143,19 +143,39 @@ def list_subtext_entries(
     status: Optional[str] = None,
     repo: ForeshadowingRepository = Depends(get_foreshadowing_repository),
 ):
-    """列出所有潜台词账本条目"""
+    """列出所有伏笔账本条目（合并 foreshadowings 和 subtext_entries）"""
     try:
         registry = repo.get_by_novel_id(NovelId(novel_id))
         if not registry:
             raise HTTPException(status_code=404, detail=f"Novel {novel_id} not found")
 
-        entries = registry.subtext_entries
+        results = []
 
-        # 按状态过滤
-        if status:
-            entries = [e for e in entries if e.status == status]
+        # 1. 转换 foreshadowings（旧数据结构）为 SubtextEntryResponse 格式
+        from domain.novel.value_objects.foreshadowing import ForeshadowingStatus
+        for f in registry.foreshadowings:
+            # 状态映射：planted -> pending, resolved -> consumed
+            entry_status = "pending" if f.status == ForeshadowingStatus.PLANTED else "consumed"
+            if status and entry_status != status:
+                continue
+            results.append(SubtextEntryResponse(
+                id=f.id,
+                chapter=f.planted_in_chapter,
+                character_id="",  # 旧数据无角色 ID
+                hidden_clue=f.description,
+                sensory_anchors={},  # 旧数据无感官锚点
+                status=entry_status,
+                consumed_at_chapter=f.resolved_in_chapter,
+                created_at=datetime.utcnow().isoformat(),  # 旧数据无创建时间
+            ))
 
-        return [_entry_to_response(e) for e in entries]
+        # 2. 添加 subtext_entries（新数据结构）
+        for e in registry.subtext_entries:
+            if status and e.status != status:
+                continue
+            results.append(_entry_to_response(e))
+
+        return results
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -179,18 +199,43 @@ def chapter_foreshadow_suggestions(
         if not registry:
             raise HTTPException(status_code=404, detail=f"Novel {novel_id} not found")
 
-        pending = [e for e in registry.subtext_entries if e.status == "pending"]
-        scored: List[Tuple[SubtextLedgerEntry, float]] = []
-        for e in pending:
-            text = " ".join(
-                [e.hidden_clue, e.character_id, " ".join(e.sensory_anchors.values())]
-            )
-            sc = _outline_clue_overlap_score(outline, text)
-            if sc >= min_score:
-                scored.append((e, sc))
+        # 合并 foreshadowings（旧）和 subtext_entries（新）
+        all_pending: List[Tuple[str, float]] = []  # (text, score)
+        entry_map: Dict[str, SubtextEntryResponse] = {}
 
-        scored.sort(key=lambda x: x[1], reverse=True)
-        top = scored[:limit]
+        # 1. 从 foreshadowings 获取 pending 条目
+        from domain.novel.value_objects.foreshadowing import ForeshadowingStatus
+        for f in registry.foreshadowings:
+            if f.status == ForeshadowingStatus.PLANTED:
+                text = f.description
+                sc = _outline_clue_overlap_score(outline, text)
+                if sc >= min_score:
+                    all_pending.append((f.id, sc))
+                    entry_map[f.id] = SubtextEntryResponse(
+                        id=f.id,
+                        chapter=f.planted_in_chapter,
+                        character_id="",
+                        hidden_clue=f.description,
+                        sensory_anchors={},
+                        status="pending",
+                        consumed_at_chapter=None,
+                        created_at=datetime.utcnow().isoformat(),
+                    )
+
+        # 2. 从 subtext_entries 获取 pending 条目
+        for e in registry.subtext_entries:
+            if e.status == "pending":
+                text = " ".join(
+                    [e.hidden_clue, e.character_id, " ".join(e.sensory_anchors.values())]
+                )
+                sc = _outline_clue_overlap_score(outline, text)
+                if sc >= min_score:
+                    all_pending.append((e.id, sc))
+                    entry_map[e.id] = _entry_to_response(e)
+
+        # 排序并取 top
+        all_pending.sort(key=lambda x: x[1], reverse=True)
+        top = all_pending[:limit]
 
         excerpt = outline.strip()
         if len(excerpt) > 200:
@@ -198,11 +243,11 @@ def chapter_foreshadow_suggestions(
 
         items = [
             ChapterForeshadowSuggestionItem(
-                entry=_entry_to_response(e),
+                entry=entry_map[eid],
                 score=round(sc, 4),
                 reason="大纲与伏笔/锚点词重叠",
             )
-            for e, sc in top
+            for eid, sc in top
         ]
 
         return ChapterForeshadowSuggestionsResponse(
