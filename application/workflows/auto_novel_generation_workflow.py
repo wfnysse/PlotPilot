@@ -3,14 +3,24 @@
 整合所有子项目组件，实现完整的章节生成流程。
 """
 import logging
+import re
 from typing import Tuple, Dict, Any, AsyncIterator, Optional, List
 from application.engine.services.context_builder import ContextBuilder
+from application.engine.word_count_control import generate_with_word_control
+from application.engine.services.word_control_service import (
+    DEFAULT_MAX_TARGET,
+    DEFAULT_MIN_TARGET,
+    WordControlMetadata,
+    WordControlService,
+    effective_length,
+)
 from application.analyst.services.state_extractor import StateExtractor
 from application.analyst.services.state_updater import StateUpdater
 from application.audit.services.conflict_detection_service import ConflictDetectionService
 from application.engine.services.style_constraint_builder import build_style_summary
 from application.engine.dtos.generation_result import GenerationResult
 from application.engine.dtos.scene_director_dto import SceneDirectorAnalysis
+from application.engine.dtos.word_control_dto import WordControlDTO
 from application.audit.dtos.ghost_annotation import GhostAnnotation
 from domain.novel.services.consistency_checker import ConsistencyChecker
 from domain.novel.services.storyline_manager import StorylineManager
@@ -18,28 +28,14 @@ from domain.novel.repositories.plot_arc_repository import PlotArcRepository
 from domain.bible.repositories.bible_repository import BibleRepository
 from domain.novel.repositories.foreshadowing_repository import ForeshadowingRepository
 from domain.novel.value_objects.consistency_report import ConsistencyReport
+from domain.novel.value_objects.consistency_report import Issue, IssueType, Severity
 from domain.novel.value_objects.chapter_state import ChapterState
 from domain.novel.value_objects.consistency_context import ConsistencyContext
 from domain.novel.value_objects.novel_id import NovelId
 from domain.ai.services.llm_service import LLMService, GenerationConfig
 from domain.ai.value_objects.prompt import Prompt
-from application.ai.llm_output_sanitize import strip_reasoning_artifacts
-from application.workflows.beat_continuation import format_prior_draft_for_prompt
 
 logger = logging.getLogger(__name__)
-
-# 与 ContextBuilder.build_structured_context 映射：Layer1≈T0+T1，Layer2=T2，Layer3=T3
-# 段名与语义对齐，避免「SMART RETRIEVAL」贴在近期正文等历史误标
-CHAPTER_CONTEXT_LAYER2_HEADER = "RECENT CHAPTERS"  # T2 近期章节正文
-CHAPTER_CONTEXT_LAYER3_HEADER = "VECTOR RECALL"  # T3 向量召回
-
-
-def assemble_chapter_bundle_context_text(payload: Dict[str, Any]) -> str:
-    """将 build_structured_context 的 payload 拼成章节主上下文块（与 prepare_chapter_generation 同源）。"""
-    return (
-        f"{payload['layer1_text']}\n\n=== {CHAPTER_CONTEXT_LAYER2_HEADER} ===\n{payload['layer2_text']}\n\n"
-        f"=== {CHAPTER_CONTEXT_LAYER3_HEADER} ===\n{payload['layer3_text']}"
-    )
 
 
 def _consistency_report_to_dict(report: ConsistencyReport) -> Dict[str, Any]:
@@ -92,7 +88,8 @@ class AutoNovelGenerationWorkflow:
         conflict_detection_service: Optional[ConflictDetectionService] = None,
         voice_fingerprint_service: Optional['VoiceFingerprintService'] = None,
         cliche_scanner: Optional['ClicheScanner'] = None,
-        memory_engine: Optional['MemoryEngine'] = None,
+        word_control_service: Optional[WordControlService] = None,
+        background_task_service=None,
     ):
         """初始化工作流
 
@@ -109,25 +106,12 @@ class AutoNovelGenerationWorkflow:
             conflict_detection_service: 冲突检测服务（可选）
             voice_fingerprint_service: 风格指纹服务（可选）
             cliche_scanner: 俗套扫描器（可选）
-            memory_engine: V6 记忆引擎（可选，提供 FACT_LOCK / BEATS / CLUES 注入与章后回写）
         """
         self.context_builder = context_builder
         self.consistency_checker = consistency_checker
         self.storyline_manager = storyline_manager
         self.plot_arc_repository = plot_arc_repository
         self.llm_service = llm_service
-
-        # ★ V6 记忆引擎（跨章节状态机）
-        self.memory_engine = memory_engine
-        if memory_engine and bible_repository:
-            # 将 memory_engine 注入 context_builder 的 budget_allocator
-            if hasattr(self.context_builder, 'budget_allocator'):
-                self.context_builder.budget_allocator.memory_engine = memory_engine
-                logger.info("✓ MemoryEngine 已注入 ContextBudgetAllocator")
-
-        # V6 运行时上下文缓存（供 _build_prompt 使用）
-        self._current_novel_id: str = ""
-        self._current_chapter_number: int = 0
         
         # 强制初始化 StateExtractor（如果未提供）
         if state_extractor is None:
@@ -144,7 +128,8 @@ class AutoNovelGenerationWorkflow:
             self.state_updater = StateUpdater(
                 bible_repository=bible_repository,
                 foreshadowing_repository=foreshadowing_repository,
-                db_connection=db.get_connection()
+                db_connection=db.get_connection(),
+                background_task_service=background_task_service
             )
         else:
             self.state_updater = state_updater
@@ -154,6 +139,177 @@ class AutoNovelGenerationWorkflow:
         self.conflict_detection_service = conflict_detection_service
         self.voice_fingerprint_service = voice_fingerprint_service
         self.cliche_scanner = cliche_scanner
+        self.theme_agent = None  # ThemeAgent 插槽，由外部注入
+        self.word_control_service = word_control_service or WordControlService()
+        self._injected_skill_keys = set()  # 记录已注入的技能，避免重复加载
+        self._skill_registry_instance = None  # ThemeSkillRegistry 实例（惰性初始化）
+        self._custom_skill_prompts = []  # 自定义技能提示词缓存（无 theme_agent 模式）
+
+    @property
+    def _skill_registry(self):
+        """惰性获取 ThemeSkillRegistry（首次调用时初始化）"""
+        if self._skill_registry_instance is None:
+            try:
+                from application.engine.theme.skill_registry import ThemeSkillRegistry
+                registry = ThemeSkillRegistry()
+                registry.auto_discover()
+                self._skill_registry_instance = registry
+                logger.info(f"ThemeSkillRegistry 初始化完成")
+            except Exception as e:
+                logger.warning(f"ThemeSkillRegistry 初始化失败（增强技能不可用）：{e}")
+                self._skill_registry_instance = None
+        return self._skill_registry_instance
+
+    def _inject_custom_skills_if_needed(self, novel_id: str) -> None:
+        """根据 novel_id 动态加载并注入自定义技能到 theme_agent 或直接缓存
+        
+        【关键修复】自定义技能现在可以独立于 theme_agent 工作！
+        即使没有 theme_agent，自定义技能也会被加载并注入到 prompt_enhancement 中。
+        """
+        # 移除早期返回，让自定义技能独立加载
+        # if not self.theme_agent:
+        #     return
+
+        try:
+            from infrastructure.persistence.database.connection import get_database
+            from infrastructure.persistence.database.sqlite_custom_skill_repository import SqliteCustomSkillRepository
+            from application.engine.theme.skills.custom_skill_wrapper import CustomThemeSkillWrapper
+
+            db = get_database()
+            custom_repo = SqliteCustomSkillRepository(db)
+            
+            # 获取该小说下所有的自定义技能
+            custom_rows = custom_repo.list_by_novel(novel_id)
+            if not custom_rows:
+                return
+
+            # 过滤掉已经注入过的技能
+            new_skills = []
+            for row in custom_rows:
+                skill_key = row.get("skill_key")
+                if skill_key and skill_key not in self._injected_skill_keys:
+                    new_skills.append(CustomThemeSkillWrapper(row))
+                    self._injected_skill_keys.add(skill_key)
+
+            if not new_skills:
+                return
+
+            # 如果有 theme_agent，注入到 theme_agent 中
+            if self.theme_agent:
+                # 获取当前已有的技能列表（包括内置的和之前注入的）
+                current_skills = list(self.theme_agent.get_skills())
+                current_skills.extend(new_skills)
+                
+                # 重新挂载 get_skills 方法
+                self.theme_agent.get_skills = lambda: current_skills
+                logger.info(f"[{novel_id}] 成功注入 {len(new_skills)} 个自定义技能到 theme_agent: {[s.skill_name for s in new_skills]}")
+            else:
+                # 【关键】如果没有 theme_agent，直接将自定义技能缓存到 workflow 中
+                # 在 _build_prompt 时会使用 self._custom_skill_prompts
+                self._custom_skill_prompts = []
+                for skill in new_skills:
+                    try:
+                        prompt_text = skill.on_prompt_build(
+                            phase="system",
+                            current_prompt="",
+                            novel_id=novel_id,
+                        )
+                        if prompt_text:
+                            self._custom_skill_prompts.append(prompt_text)
+                    except Exception as e:
+                        logger.warning(f"自定义技能 {skill.skill_name} prompt 注入失败: {e}")
+                
+                logger.info(f"[{novel_id}] 成功缓存 {len(new_skills)} 个自定义技能（无 theme_agent 模式）: {[s.skill_name for s in new_skills]}")
+
+        except Exception as e:
+            logger.warning(f"[{novel_id}] 注入自定义技能失败: {e}")
+
+    def _temp_override_theme_config(
+        self,
+        novel_id: str,
+        theme_agent_enabled: Optional[bool],
+        enabled_theme_skills: Optional[List[str]],
+    ) -> None:
+        """临时覆盖题材增强配置（用于单次生成请求）
+        
+        Args:
+            novel_id: 小说 ID
+            theme_agent_enabled: 是否启用题材 Agent
+            enabled_theme_skills: 启用的技能 key 列表
+        """
+        # 🔑 关键修复：如果 theme_agent 为 None 但前端请求启用，尝试动态加载
+        if not self.theme_agent and theme_agent_enabled:
+            try:
+                from infrastructure.persistence.database.connection import get_database
+                from infrastructure.persistence.database.sqlite_novel_repository import SqliteNovelRepository
+                from application.engine.theme.theme_registry import ThemeRegistry
+                
+                db = get_database()
+                novel_repo = SqliteNovelRepository(db)
+                novel = novel_repo.get_by_id(novel_id)
+                
+                if novel:
+                    genre = getattr(novel, 'genre', '') or ''
+                    if genre:
+                        registry = ThemeRegistry()
+                        registry.auto_discover()
+                        agent = registry.get(genre)
+                        
+                        if agent:
+                            self.theme_agent = agent
+                            # 同时注入到 context_builder
+                            if self.context_builder:
+                                self.context_builder.theme_agent = agent
+                            logger.info(f"[{novel_id}] 动态加载题材 Agent: {genre}")
+                        else:
+                            logger.warning(f"[{novel_id}] 未找到 genre='{genre}' 对应的题材 Agent")
+                    else:
+                        logger.warning(f"[{novel_id}] 小说未设置 genre，无法加载题材 Agent")
+                else:
+                    logger.warning(f"[{novel_id}] 未找到小说记录")
+            except Exception as e:
+                logger.warning(f"[{novel_id}] 动态加载题材 Agent 失败: {e}")
+        
+        # 如果没有 theme_agent，直接返回
+        if not self.theme_agent:
+            return
+        
+        # 如果未指定 skills，则使用当前已配置的
+        if enabled_theme_skills is None:
+            return
+        
+        try:
+            from infrastructure.persistence.database.connection import get_database
+            from infrastructure.persistence.database.sqlite_custom_skill_repository import SqliteCustomSkillRepository
+            from application.engine.theme.skills.custom_skill_wrapper import CustomThemeSkillWrapper
+            
+            skills = []
+            
+            # 1. 从内置 SkillRegistry 加载
+            if self._skill_registry:
+                builtin_keys = [k for k in enabled_theme_skills if not k.startswith("custom_")]
+                skills.extend(self._skill_registry.get_skills_by_keys(builtin_keys))
+            
+            # 2. 从 DB 加载自定义技能
+            custom_keys = [k for k in enabled_theme_skills if k.startswith("custom_")]
+            if custom_keys:
+                db = get_database()
+                custom_repo = SqliteCustomSkillRepository(db)
+                custom_rows = custom_repo.list_by_novel(novel_id)
+                for row in custom_rows:
+                    if row["skill_key"] in custom_keys:
+                        skills.append(CustomThemeSkillWrapper(row))
+            
+            if skills:
+                # 临时覆盖 get_skills 方法
+                original_get_skills = self.theme_agent.get_skills
+                self.theme_agent.get_skills = lambda: skills
+                logger.info(f"[{novel_id}] 临时注入 {len(skills)} 个技能: {[s.skill_name for s in skills]}")
+                
+                # 注意：这里不恢复原始方法，因为单次请求后 workflow 实例会被复用
+                # 如果需要恢复，可以在 generate_chapter_stream 结束时恢复
+        except Exception as e:
+            logger.warning(f"[{novel_id}] 临时覆盖题材配置失败: {e}")
 
     def prepare_chapter_generation(
         self,
@@ -168,6 +324,9 @@ class AutoNovelGenerationWorkflow:
 
         托管守护进程与 HTTP 接口应复用此方法，避免「两套基建」。
         """
+        # 🔑 关键修复：在准备上下文前，先注入自定义技能
+        self._inject_custom_skills_if_needed(novel_id)
+
         storyline_context = self._get_storyline_context(novel_id, chapter_number)
         plot_tension = self._get_plot_tension(novel_id, chapter_number)
         payload = self.context_builder.build_structured_context(
@@ -177,7 +336,10 @@ class AutoNovelGenerationWorkflow:
             max_tokens=max_tokens,
             scene_director=scene_director,
         )
-        context = assemble_chapter_bundle_context_text(payload)
+        context = (
+            f"{payload['layer1_text']}\n\n=== SMART RETRIEVAL ===\n{payload['layer2_text']}\n\n"
+            f"=== RECENT CONTEXT ===\n{payload['layer3_text']}"
+        )
         context_tokens = payload["token_usage"]["total"]
         style_summary = self._get_style_summary(novel_id)
         voice_anchors = ""
@@ -185,62 +347,6 @@ class AutoNovelGenerationWorkflow:
             voice_anchors = self.context_builder.build_voice_anchor_system_section(novel_id)
         except Exception as e:
             logger.warning("voice_anchor section skipped: %s", e)
-        return {
-            "storyline_context": storyline_context,
-            "plot_tension": plot_tension,
-            "context": context,
-            "context_tokens": context_tokens,
-            "style_summary": style_summary,
-            "voice_anchors": voice_anchors,
-        }
-
-    def build_fallback_chapter_bundle(
-        self,
-        novel_id: str,
-        chapter_number: int,
-        outline: str,
-        *,
-        scene_director: Optional[SceneDirectorAnalysis] = None,
-        max_tokens: int = 20000,
-    ) -> Dict[str, Any]:
-        """prepare_chapter_generation 失败时的降级：仍用三层洋葱 + 同段名拼接；叙事/文风各步独立容错。
-
-        供全托管等场景在「故事线/张力等」子步骤异常时保持与主路径一致的上下文形态。
-        """
-        payload = self.context_builder.build_structured_context(
-            novel_id=novel_id,
-            chapter_number=chapter_number,
-            outline=outline,
-            max_tokens=max_tokens,
-            scene_director=scene_director,
-        )
-        context = assemble_chapter_bundle_context_text(payload)
-        context_tokens = payload["token_usage"]["total"]
-
-        storyline_context = ""
-        try:
-            storyline_context = self._get_storyline_context(novel_id, chapter_number)
-        except Exception as e:
-            logger.warning("fallback storyline_context skipped: %s", e)
-
-        plot_tension = ""
-        try:
-            plot_tension = self._get_plot_tension(novel_id, chapter_number)
-        except Exception as e:
-            logger.warning("fallback plot_tension skipped: %s", e)
-
-        style_summary = ""
-        try:
-            style_summary = self._get_style_summary(novel_id)
-        except Exception as e:
-            logger.warning("fallback style_summary skipped: %s", e)
-
-        voice_anchors = ""
-        try:
-            voice_anchors = self.context_builder.build_voice_anchor_system_section(novel_id)
-        except Exception as e:
-            logger.warning("fallback voice_anchors skipped: %s", e)
-
         return {
             "storyline_context": storyline_context,
             "plot_tension": plot_tension,
@@ -258,46 +364,284 @@ class AutoNovelGenerationWorkflow:
         content: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
     ) -> Dict[str, Any]:
-        """生成正文后的统一后处理：俗套扫描、状态提取、一致性、冲突批注、StateUpdater、MemoryEngine回写。"""
+        """生成正文后的统一后处理：俗套扫描、状态提取、一致性、冲突批注、StateUpdater。"""
+        content, seam_rewrite_info = await self._apply_seam_rewrite_loop(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            outline=outline,
+            content=content,
+        )
         style_warnings = self._scan_cliches(content)
         chapter_state = await self._extract_chapter_state(content, chapter_number)
         consistency_report = self._check_consistency(chapter_state, novel_id)
+        consistency_report = self._review_chapter_seam(
+            novel_id=novel_id,
+            chapter_number=chapter_number,
+            content=content,
+            base_report=consistency_report,
+            rewrite_info=seam_rewrite_info,
+        )
         ghost_annotations = self._detect_conflicts(novel_id, chapter_number, outline, scene_director)
-        if self.state_updater:
+        # 修复问题 9：只有章节通过 seam 检查后才持久化状态，避免被拒绝的章节污染知识库
+        if self.state_updater and not self._requires_manual_seam_revision(seam_rewrite_info):
             try:
                 self.state_updater.update_from_chapter(novel_id, chapter_number, chapter_state)
             except Exception as e:
                 logger.warning("StateUpdater 失败: %s", e)
-
-        # ★ V6 新增：MemoryEngine 章后状态回写（LLM 驱动的增量提取）
-        memory_delta = {}
-        if self.memory_engine:
-            try:
-                memory_delta = await self.memory_engine.update_from_chapter(
-                    novel_id=novel_id,
-                    chapter_number=chapter_number,
-                    content=content,
-                    outline=outline,
-                )
-                if memory_delta.get("new_beats", 0) or memory_delta.get("new_clues", 0):
-                    logger.info(
-                        f"  🧠 MemoryEngine: +{memory_delta.get('new_beats', 0)} beats, "
-                        f"+{memory_delta.get('new_clues', 0)} clues"
-                    )
-                if memory_delta.get("violations", 0):
-                    logger.warning(
-                        f"  ⚠️ MemoryEngine 检测到 {memory_delta['violations']} 个事实违反"
-                    )
-            except Exception as e:
-                logger.warning("MemoryEngine 章后回写失败: %s", e)
-
         return {
+            "content": content,
             "style_warnings": style_warnings,
             "chapter_state": chapter_state,
             "consistency_report": consistency_report,
             "ghost_annotations": ghost_annotations,
-            "memory_delta": memory_delta,
+            "seam_rewrite_info": seam_rewrite_info,
         }
+
+    def _resolve_target_word_count(self, target_word_count: Optional[int]) -> Optional[int]:
+        if target_word_count is None:
+            return None
+        self.word_control_service.validate_target(target_word_count)
+        return target_word_count
+
+    def _emit_word_control_warning(self, target_word_count: Optional[int]) -> Optional[Dict[str, Any]]:
+        if target_word_count is None:
+            return None
+        if not self.word_control_service.target_requires_warning(target_word_count):
+            return None
+        return {
+            "type": "warning",
+            "warning_type": "target_word_count_extreme",
+            "target_word_count": target_word_count,
+            "recommended_min": DEFAULT_MIN_TARGET,
+            "recommended_max": DEFAULT_MAX_TARGET,
+            "message": f"目标字数 {target_word_count} 偏离常用范围（建议 {DEFAULT_MIN_TARGET}-{DEFAULT_MAX_TARGET} 字）。",
+        }
+
+    def _serialize_word_control(self, metadata: Optional[WordControlMetadata]) -> Optional[WordControlDTO]:
+        if metadata is None:
+            return None
+        return WordControlDTO(
+            target=metadata.target,
+            actual=metadata.actual,
+            tolerance=metadata.tolerance,
+            delta=metadata.delta,
+            status=metadata.status,
+            within_tolerance=metadata.within_tolerance,
+            action=metadata.action,
+            expansion_attempts=metadata.expansion_attempts,
+            fallback_used=metadata.fallback_used,
+            min_allowed=metadata.min_allowed,
+            max_allowed=metadata.max_allowed,
+        )
+
+    async def _generate_chapter_content(
+        self,
+        *,
+        context: str,
+        outline: str,
+        bundle: Dict[str, Any],
+        config: GenerationConfig,
+        chapter_number: int,
+        enable_beats: bool,
+        target_word_count: Optional[int],
+    ) -> tuple[str, list[dict[str, Any]]]:
+        beats = []
+        if enable_beats:
+            logger.info("🔥🔥🔥 [DEBUG] 启用节拍模式，拆分大纲为微观节拍 🔥🔥🔥")
+            # 【关键修复】传入 target_word_count，让节拍拆分基于用户设置的目标字数
+            actual_target = target_word_count or 3500  # 如果未设置，使用默认值 3500
+            logger.info(f"🔥 [DEBUG] 目标字数: {actual_target}")
+            raw_beats = self.context_builder.magnify_outline_to_beats(chapter_number, outline, target_chapter_words=actual_target)
+            if isinstance(raw_beats, list):
+                beats = raw_beats
+            else:
+                try:
+                    beats = list(raw_beats or [])
+                except TypeError:
+                    beats = []
+            logger.info(f"  ✓ 已拆分为 {len(beats)} 个微观节拍（基于目标字数={actual_target}）")
+            
+            # 【安全检查】验证节拍总字数是否合理
+            if beats and target_word_count is not None:
+                total_beat_words = sum(beat.target_words for beat in beats)
+                if total_beat_words > target_word_count * 1.2:  # 超过 20% 警告
+                    logger.warning(f"  ⚠️ 节拍总字数 ({total_beat_words}) 超过目标字数 ({target_word_count}) 的 120%，可能导致超标！")
+
+        if enable_beats and beats:
+            content_parts = []
+            total_actual_words = 0  # 【新增】跟踪实际总字数
+            for i, beat in enumerate(beats):
+                # 【新增】传入 target_word_count，让节拍提示词包含比例信息
+                beat_prompt_text = self.context_builder.build_beat_prompt(
+                    beat, i, len(beats), 
+                    target_chapter_words=target_word_count or 2500
+                )
+                logger.info(f"生成节拍 {i+1}/{len(beats)}: {beat.focus} - 目标{beat.target_words}字, 上限{int(beat.target_words * 1.1)}字")
+                prompt = self._build_prompt(
+                    context,
+                    outline,
+                    storyline_context=bundle["storyline_context"],
+                    plot_tension=bundle["plot_tension"],
+                    style_summary=bundle["style_summary"],
+                    beat_prompt=beat_prompt_text,
+                    beat_index=i,
+                    total_beats=len(beats),
+                    beat_target_words=beat.target_words,
+                    voice_anchors=bundle.get("voice_anchors") or "",
+                    target_word_count=target_word_count,  # 【新增】传递目标字数
+                )
+                # 【移除】不再需要 inject_length_requirements，因为 _build_prompt 已经处理了
+                # 【新增】按节拍目标字数分配 max_tokens
+                beat_config = GenerationConfig(
+                    max_tokens=max(512, int(beat.target_words * 1.1)),
+                    temperature=config.temperature,
+                )
+                logger.info(f"  → 节拍 {i+1} max_tokens={beat_config.max_tokens} (基于目标{beat.target_words}字)")
+                llm_result = await self.llm_service.generate(prompt, beat_config)
+                content_parts.append(llm_result.content)
+                
+                # 【新增】记录每个节拍的实际字数
+                beat_actual = len(llm_result.content)
+                total_actual_words += beat_actual
+                logger.info(f"  ✓ 节拍 {i+1} 完成: {beat_actual}字 (目标{beat.target_words}字, {'✅' if beat_actual <= int(beat.target_words * 1.1) else '❌超标'})")
+
+            content = "".join(content_parts)
+            # 【新增】检查总字数是否超标
+            if target_word_count:
+                is_ok = total_actual_words <= int(target_word_count * 1.1)
+                status = '✅' if is_ok else '❌超标'
+            else:
+                status = 'N/A'
+            logger.info(f"  ✓ 节拍生成完成: {len(beats)} 个节拍, 总计{total_actual_words}字符 (目标{target_word_count}字, {status})")
+        else:
+            prompt = self._build_prompt(
+                context,
+                outline,
+                storyline_context=bundle["storyline_context"],
+                plot_tension=bundle["plot_tension"],
+                style_summary=bundle["style_summary"],
+                voice_anchors=bundle.get("voice_anchors") or "",
+                target_word_count=target_word_count,  # 【新增】传递目标字数
+            )
+            # 【移除】不再需要 inject_length_requirements，因为 _build_prompt 已经处理了
+            logger.info(f"  → 发送请求到 LLM (max_tokens={config.max_tokens}, temperature={config.temperature})")
+            llm_result = await self.llm_service.generate(prompt, config)
+            content = llm_result.content
+            logger.info(f"  ✓ LLM 响应已接收: {len(content)} 字符")
+
+        micro_beats = []
+        if beats:
+            micro_beats = [
+                {
+                    "description": beat.description,
+                    "target_words": beat.target_words,
+                    "focus": beat.focus,
+                }
+                for beat in beats
+            ]
+        return content, micro_beats
+
+    async def _apply_word_control(
+        self,
+        *,
+        content: str,
+        outline: str,
+        target_word_count: Optional[int],
+        emit_event: Optional[Any] = None,
+    ) -> tuple[str, Optional[WordControlMetadata]]:
+        """字数控制：仅补写，不裁剪，但会检测超标并警告。"""
+        if target_word_count is None:
+            return content, None
+
+        # 1. 检查当前字数
+        current_len = effective_length(content)
+        
+        # 2. 设定容差范围（下限 85%，上限 110%）
+        min_allowed = int(target_word_count * 0.85)
+        max_allowed = int(target_word_count * 1.1)
+        
+        # 3. 检查是否在合理范围内
+        if current_len >= min_allowed and current_len <= max_allowed:
+            logger.info(f"字数达标 ({current_len}/{target_word_count})，在允许范围内。")
+            metadata = WordControlMetadata(
+                target=target_word_count,
+                actual=current_len,
+                tolerance=0.15,
+                delta=current_len - target_word_count,
+                status="ok",
+                within_tolerance=True,
+                action="none",
+                expansion_attempts=0,
+                fallback_used=False,
+                min_allowed=min_allowed,
+                max_allowed=max_allowed,
+            )
+            return content, metadata
+        
+        # 3b. 如果超标，记录警告但仍然返回（不裁剪）
+        if current_len > max_allowed:
+            excess_ratio = (current_len - target_word_count) / target_word_count * 100
+            logger.warning(f"⚠️ 字数超标 ({current_len}/{target_word_count})，超出 {excess_ratio:.1f}%，但不裁剪，保留原文。")
+            metadata = WordControlMetadata(
+                target=target_word_count,
+                actual=current_len,
+                tolerance=0.15,
+                delta=current_len - target_word_count,
+                status="too_long",
+                within_tolerance=False,
+                action="none",  # 不采取行动，只记录
+                expansion_attempts=0,
+                fallback_used=False,
+                min_allowed=min_allowed,
+                max_allowed=max_allowed,
+            )
+            return content, metadata
+
+        # 4. 只有严重不足时才触发补写
+        if emit_event:
+            await emit_event({
+                "type": "phase", 
+                "phase": "post", 
+                "status_text": f"字数不足 ({current_len}字)，正在智能补写...",
+            })
+
+        logger.warning(f"字数不足 ({current_len}/{min_allowed})，触发定向扩写。")
+        
+        async def llm_caller(prompt: Prompt):
+            return await self.llm_service.generate(prompt, GenerationConfig(temperature=0.7))
+
+        # 调用扩写逻辑
+        result = await generate_with_word_control(
+            prompt=Prompt(
+                system="你是长篇小说续写助手。请根据大纲和已有正文，补充细节、对话或心理描写，使章节更加丰满。严禁删减已有内容。",
+                user=f"【本章大纲】\n{outline}\n\n【已有正文】\n{content}",
+            ),
+            target_words=target_word_count,
+            llm_caller=llm_caller,
+            initial_content=content,
+            emit_event=emit_event,
+        )
+
+        controlled_content = result["content"]
+        final_len = effective_length(controlled_content)
+        
+        # 【修复】使用正确的 max_allowed
+        max_allowed_after_expand = int(target_word_count * 1.1)
+
+        metadata = WordControlMetadata(
+            target=result["target_word_count"],
+            actual=final_len,
+            tolerance=result["tolerance"],
+            delta=final_len - target_word_count,
+            status=result["status"],
+            within_tolerance=final_len >= min_allowed and final_len <= max_allowed_after_expand,
+            action="expanded",
+            expansion_attempts=result.get("expansion_attempts", 1),
+            fallback_used=result["fallback_used"],
+            min_allowed=min_allowed,
+            max_allowed=max_allowed_after_expand,
+        )
+        return controlled_content, metadata
 
     async def generate_chapter(
         self,
@@ -305,7 +649,8 @@ class AutoNovelGenerationWorkflow:
         chapter_number: int,
         outline: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
-        enable_beats: bool = True
+        enable_beats: bool = True,
+        target_word_count: Optional[int] = None,
     ) -> GenerationResult:
         """生成章节（完整工作流）
 
@@ -327,15 +672,12 @@ class AutoNovelGenerationWorkflow:
             raise ValueError("chapter_number must be positive")
         if not outline or not outline.strip():
             raise ValueError("outline cannot be empty")
+        target_word_count = self._resolve_target_word_count(target_word_count)
 
         logger.info(f"========================================")
         logger.info(f"开始生成章节: 小说={novel_id}, 章节={chapter_number}")
         logger.info(f"大纲: {outline[:100]}...")
         logger.info(f"========================================")
-
-        # ★ V6: 缓存当前 novel_id/chapter_number 供 _build_prompt 中 MemoryEngine 使用
-        self._current_novel_id = novel_id
-        self._current_chapter_number = chapter_number
 
         logger.info("阶段 1-2: 规划 + 结构化上下文（prepare_chapter_generation）")
         bundle = self.prepare_chapter_generation(
@@ -347,77 +689,64 @@ class AutoNovelGenerationWorkflow:
 
         logger.info("阶段 3: 生成 - 调用 LLM")
         config = GenerationConfig()
+        if target_word_count is not None:
+            # 【修正】根据实际观测：1 token ≈ 1.5个中文字符，所以需要除以1.5
+            config.max_tokens = max(512, int(target_word_count / 1.5))
+            logger.info(f"  → max_tokens 动态调整: {config.max_tokens} (基于目标字数 {target_word_count}, 预计{int(target_word_count / 1.5)} tokens)")
+        content, micro_beats = await self._generate_chapter_content(
+            context=context,
+            outline=outline,
+            bundle=bundle,
+            config=config,
+            chapter_number=chapter_number,
+            enable_beats=enable_beats,
+            target_word_count=target_word_count,
+        )
+        if micro_beats:
+            bundle["micro_beats"] = micro_beats
+
+        content, word_control = await self._apply_word_control(
+            content=content,
+            outline=outline,
+            target_word_count=target_word_count,
+        )
         
-        # 如果使用节拍模式，先放大节拍
-        beats = []
-        if enable_beats:
-            logger.info("  → 启用节拍模式，拆分大纲为微观节拍")
-            beats = self.context_builder.magnify_outline_to_beats(chapter_number, outline)
-            logger.info(f"  ✓ 已拆分为 {len(beats)} 个微观节拍")
-        
-        # 根据是否使用节拍选择不同的生成策略
-        if enable_beats and beats:
-            # 按节拍生成
-            content_parts: list[str] = []
-            for i, beat in enumerate(beats):
-                prior_draft = "\n\n".join(content_parts)
-                beat_prompt_text = self.context_builder.build_beat_prompt(beat, i, len(beats))
-                logger.info(f"生成节拍 {i+1}/{len(beats)}: {beat.focus} - {beat.description[:50]}...")
-                
-                prompt = self._build_prompt(
-                    context,
-                    outline,
-                    storyline_context=bundle["storyline_context"],
-                    plot_tension=bundle["plot_tension"],
-                    style_summary=bundle["style_summary"],
-                    beat_prompt=beat_prompt_text,
-                    beat_index=i,
-                    total_beats=len(beats),
-                    beat_target_words=beat.target_words,
-                    voice_anchors=bundle.get("voice_anchors") or "",
-                    chapter_draft_so_far=prior_draft,
-                )
-                
-                llm_result = await self.llm_service.generate(prompt, config)
-                beat_content = llm_result.content
-                content_parts.append(beat_content)
-            
-            content = strip_reasoning_artifacts("".join(content_parts))
-            logger.info(f"  ✓ 节拍生成完成: {len(beats)} 个节拍, {len(content)} 字符")
-        else:
-            # 传统单段生成
-            prompt = self._build_prompt(
-                context,
-                outline,
-                storyline_context=bundle["storyline_context"],
-                plot_tension=bundle["plot_tension"],
-                style_summary=bundle["style_summary"],
-                voice_anchors=bundle.get("voice_anchors") or "",
-            )
-            logger.info(f"  → 发送请求到 LLM (max_tokens={config.max_tokens}, temperature={config.temperature})")
-            llm_result = await self.llm_service.generate(prompt, config)
-            content = strip_reasoning_artifacts(llm_result.content or "")
-            logger.info(f"  ✓ LLM 响应已接收: {len(content)} 字符")
-        
-        # 保存微观节拍用于后续处理
-        if beats:
-            bundle["micro_beats"] = [
-                {
-                    "description": beat.description,
-                    "target_words": beat.target_words,
-                    "focus": beat.focus
-                } for beat in beats
-            ]
+        # 【新增】字数超标警告
+        word_count_warning = None
+        if target_word_count and word_control:
+            actual_len = word_control.actual
+            strict_max = int(target_word_count * 1.1)
+            if actual_len > strict_max:
+                excess_ratio = (actual_len - target_word_count) / target_word_count * 100
+                word_count_warning = {
+                    "type": "word_count_exceeded",
+                    "target": target_word_count,
+                    "actual": actual_len,
+                    "excess_chars": actual_len - target_word_count,
+                    "excess_ratio": f"{excess_ratio:.1f}%",
+                    "message": f"章节字数 {actual_len} 字，超出目标 {target_word_count} 字 {excess_ratio:.1f}%（允许上限 {strict_max} 字）。建议：手动删减或重新生成。"
+                }
+                logger.warning(f"⚠️ 字数超标警告: {actual_len}/{target_word_count} 字, 超出 {excess_ratio:.1f}%")
 
         logger.info("阶段 4: 后处理（post_process_generated_chapter）")
         post = await self.post_process_generated_chapter(
             novel_id, chapter_number, outline, content, scene_director=scene_director
         )
+        seam_rewrite_info = post.get("seam_rewrite_info") or {}
+        content = post.get("content") or content
         style_warnings = post["style_warnings"]
         consistency_report = post["consistency_report"]
         ghost_annotations = post["ghost_annotations"]
         if style_warnings:
             logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+        if seam_rewrite_info.get("applied"):
+            logger.info(
+                "  ✓ 接缝修复已执行: attempts=%s status=%s",
+                seam_rewrite_info.get("attempts"),
+                seam_rewrite_info.get("status"),
+            )
+        if self._requires_manual_seam_revision(seam_rewrite_info):
+            raise RuntimeError("章节接缝复检未通过，需要人工修订后再保存")
 
         # Phase 5: Review - 返回结果
         logger.info(f"阶段 5: 完成 - 章节生成完成")
@@ -433,7 +762,9 @@ class AutoNovelGenerationWorkflow:
             context_used=context,
             token_count=token_count,
             ghost_annotations=ghost_annotations,
-            style_warnings=style_warnings
+            word_count_warning=word_count_warning,  # 【新增】字数警告
+            style_warnings=style_warnings,
+            word_control=self._serialize_word_control(word_control),
         )
 
     async def generate_chapter_stream(
@@ -442,7 +773,10 @@ class AutoNovelGenerationWorkflow:
         chapter_number: int,
         outline: str,
         scene_director: Optional[SceneDirectorAnalysis] = None,
-        enable_beats: bool = True
+        enable_beats: bool = True,
+        target_word_count: Optional[int] = None,
+        theme_agent_enabled: Optional[bool] = None,
+        enabled_theme_skills: Optional[List[str]] = None,
     ) -> AsyncIterator[Dict[str, Any]]:
         """流式生成章节：阶段事件 + 正文 token 流 + 最终 done（含一致性报告）。
 
@@ -457,14 +791,27 @@ class AutoNovelGenerationWorkflow:
                 raise ValueError("chapter_number must be positive")
             if not outline or not outline.strip():
                 raise ValueError("outline cannot be empty")
+            target_word_count = self._resolve_target_word_count(target_word_count)
 
             logger.info(f"========================================")
             logger.info(f"开始流式生成章节: 小说={novel_id}, 章节={chapter_number}")
             logger.info(f"========================================")
 
             yield {"type": "phase", "phase": "planning"}
+            warning_event = self._emit_word_control_warning(target_word_count)
+            if warning_event:
+                yield warning_event
             yield {"type": "phase", "phase": "context"}
             logger.info("阶段 1-2: prepare_chapter_generation（规划 + 结构化上下文）")
+            
+            # 【关键修复】重置自定义技能缓存，避免跨章节污染
+            self._custom_skill_prompts = []
+            
+            # 如果前端传入了题材增强配置，临时覆盖
+            if theme_agent_enabled is not None or enabled_theme_skills is not None:
+                logger.info(f"  → 使用前端传入的题材增强配置: enabled={theme_agent_enabled}, skills={enabled_theme_skills}")
+                self._temp_override_theme_config(novel_id, theme_agent_enabled, enabled_theme_skills)
+            
             bundle = self.prepare_chapter_generation(
                 novel_id, chapter_number, outline, scene_director=scene_director
             )
@@ -481,8 +828,23 @@ class AutoNovelGenerationWorkflow:
             beats = []
             if enable_beats:
                 logger.info("  → 启用节拍模式，拆分大纲为微观节拍")
-                beats = self.context_builder.magnify_outline_to_beats(chapter_number, outline)
-                logger.info(f"  ✓ 已拆分为 {len(beats)} 个微观节拍")
+                # 【关键修复】传入 target_word_count，让节拍拆分基于用户设置的目标字数
+                actual_target = target_word_count or 3500  # 如果未设置，使用默认值 3500
+                raw_beats = self.context_builder.magnify_outline_to_beats(chapter_number, outline, target_chapter_words=actual_target)
+                if isinstance(raw_beats, list):
+                    beats = raw_beats
+                else:
+                    try:
+                        beats = list(raw_beats or [])
+                    except TypeError:
+                        beats = []
+                logger.info(f"  ✓ 已拆分为 {len(beats)} 个微观节拍（基于目标字数={actual_target}）")
+                
+                # 【安全检查】验证节拍总字数是否合理
+                if beats and target_word_count is not None:
+                    total_beat_words = sum(beat.target_words for beat in beats)
+                    if total_beat_words > target_word_count * 1.2:  # 超过 20% 警告
+                        logger.warning(f"  ⚠️ 节拍总字数 ({total_beat_words}) 超过目标字数 ({target_word_count}) 的 120%，可能导致超标！")
                 
                 # 发送节拍信息用于前端展示
                 yield {
@@ -499,11 +861,16 @@ class AutoNovelGenerationWorkflow:
             # 根据是否使用节拍选择不同的生成策略
             if enable_beats and beats:
                 # 按节拍生成
-                content_parts: list[str] = []
+                content_parts = []
+                total_chars = 0  # 累计字数统计
+                total_actual_words = 0  # 【新增】跟踪实际总字数
                 for i, beat in enumerate(beats):
-                    prior_draft = "\n\n".join(content_parts)
-                    beat_prompt_text = self.context_builder.build_beat_prompt(beat, i, len(beats))
-                    logger.info(f"生成节拍 {i+1}/{len(beats)}: {beat.focus} - {beat.description[:50]}...")
+                    # 【新增】传入 target_word_count，让节拍提示词包含比例信息
+                    beat_prompt_text = self.context_builder.build_beat_prompt(
+                        beat, i, len(beats),
+                        target_chapter_words=target_word_count or 2500
+                    )
+                    logger.info(f"🔥 [DEBUG] 生成节拍 {i+1}/{len(beats)}: {beat.focus} - 目标{beat.target_words}字, 上限{int(beat.target_words * 1.1)}字")
                     
                     prompt = self._build_prompt(
                         context,
@@ -516,24 +883,58 @@ class AutoNovelGenerationWorkflow:
                         total_beats=len(beats),
                         beat_target_words=beat.target_words,
                         voice_anchors=bundle.get("voice_anchors") or "",
-                        chapter_draft_so_far=prior_draft,
+                        target_word_count=target_word_count,  # 【新增】传递目标字数
                     )
+                    # 【移除】不再需要 inject_length_requirements，因为 _build_prompt 已经处理了
+                    
+                    # 【关键修复】为每个节拍设置独立的 max_tokens，强制限制输出长度
+                    # 【修正】根据实际观测：1 token ≈ 1.5个中文字符，所以需要除以1.5
+                    beat_config = GenerationConfig(
+                        max_tokens=max(256, int(beat.target_words / 1.5)),
+                        temperature=config.temperature,
+                    )
+                    logger.info(f"🔥 [DEBUG] 节拍 {i+1} max_tokens={beat_config.max_tokens} (目标{beat.target_words}字, 预计{int(beat.target_words / 1.5)} tokens)")
                     
                     beat_content = ""
-                    async for piece in self.llm_service.stream_generate(prompt, config):
+                    async for piece in self.llm_service.stream_generate(prompt, beat_config):
                         chunk_count += 1
                         beat_content += piece
+                        total_chars += len(piece)  # 累计字数
+                        # 🔍 调试日志：确认节拍模式下的 chunk 事件
+                        if chunk_count <= 3 or chunk_count % 10 == 0:  # 只记录前3个和每10个
+                            logger.info(f"  [Beat {i}] Chunk #{chunk_count}: {len(piece)} chars, preview='{piece[:30]}...'")
+                        # 增强事件：包含累计字数和预估 token
+                        estimated_tokens = int(total_chars / 1.5)
                         yield {
                             "type": "chunk", 
                             "text": piece,
                             "beat_index": i,
-                            "beat_focus": beat.focus
+                            "beat_focus": beat.focus,
+                            "stats": {
+                                "chars": total_chars,
+                                "chunks": chunk_count,
+                                "estimated_tokens": estimated_tokens,
+                            }
                         }
                     
                     content_parts.append(beat_content)
+                    
+                    # 【新增】记录每个节拍的实际字数
+                    beat_actual = len(beat_content)
+                    total_actual_words += beat_actual
+                    logger.info(f"🔥 [DEBUG] ✓ 节拍 {i+1} 完成: {beat_actual}字 (目标{beat.target_words}字, {'✅' if beat_actual <= int(beat.target_words * 1.1) else '❌超标'})")
+                    
                     yield {"type": "beat_done", "beat_index": i, "beat_content_length": len(beat_content)}
                 
-                content = strip_reasoning_artifacts("".join(content_parts))
+                content = "".join(content_parts)
+                
+                # 【新增】检查总字数是否超标
+                if target_word_count:
+                    is_ok = total_actual_words <= int(target_word_count * 1.1)
+                    status = '✅' if is_ok else '❌超标'
+                    logger.info(f"🔥 [DEBUG] ✓ 节拍生成完成: {len(beats)} 个节拍, 总计{total_actual_words}字符 (目标{target_word_count}字, {status})")
+                else:
+                    logger.info(f"🔥 [DEBUG] ✓ 节拍生成完成: {len(beats)} 个节拍, 总计{total_actual_words}字符")
             else:
                 # 传统单段生成
                 prompt = self._build_prompt(
@@ -543,7 +944,9 @@ class AutoNovelGenerationWorkflow:
                     plot_tension=bundle["plot_tension"],
                     style_summary=bundle["style_summary"],
                     voice_anchors=bundle.get("voice_anchors") or "",
+                    target_word_count=target_word_count,  # 【新增】传递目标字数
                 )
+                # 【移除】不再需要 inject_length_requirements，因为 _build_prompt 已经处理了
                 
                 logger.info(f"  → 发送流式请求到 LLM")
                 parts: list[str] = []
@@ -552,6 +955,9 @@ class AutoNovelGenerationWorkflow:
                     parts.append(piece)
                     chunk_count += 1
                     total_chars += len(piece)
+                    # 🔍 调试日志：确认传统模式下的 chunk 事件
+                    if chunk_count <= 3 or chunk_count % 10 == 0:
+                        logger.info(f"  [Traditional] Chunk #{chunk_count}: {len(piece)} chars, preview='{piece[:30]}...'")
                     # 增强事件：包含累计字数和预估 token（中文约 1.5 字/token，英文约 4 字/token）
                     estimated_tokens = int(total_chars / 1.5)  # 简化估算
                     yield {
@@ -564,7 +970,7 @@ class AutoNovelGenerationWorkflow:
                         }
                     }
 
-                content = strip_reasoning_artifacts("".join(parts))
+                content = "".join(parts)
             logger.info(f"  ✓ LLM 流式响应完成: {chunk_count} 个块, {len(content)} 字符")
 
             if not content.strip():
@@ -572,16 +978,63 @@ class AutoNovelGenerationWorkflow:
                 yield {"type": "error", "message": "模型返回空内容"}
                 return
 
+            async def emit_word_control_event(event: Dict[str, Any]) -> None:
+                yieldable = dict(event)
+                if target_word_count is not None:
+                    yieldable["target_word_count"] = target_word_count
+                events_buffer.append(yieldable)
+
             yield {"type": "phase", "phase": "post"}
             logger.info("阶段 4: post_process_generated_chapter")
+            events_buffer: List[Dict[str, Any]] = []
+            content, word_control = await self._apply_word_control(
+                content=content,
+                outline=outline,
+                target_word_count=target_word_count,
+                emit_event=emit_word_control_event,
+            )
+            for buffered_event in events_buffer:
+                yield buffered_event
             post = await self.post_process_generated_chapter(
                 novel_id, chapter_number, outline, content, scene_director=scene_director
             )
+            seam_rewrite_info = post.get("seam_rewrite_info") or {}
+            original_content = content
+            content = post.get("content") or content
             style_warnings = post["style_warnings"]
             consistency_report = post["consistency_report"]
             ghost_annotations = post["ghost_annotations"]
             if style_warnings:
                 logger.info(f"  ✓ 俗套扫描: 检测到 {len(style_warnings)} 个俗套句式")
+            if seam_rewrite_info.get("applied") and content != original_content:
+                yield {
+                    "type": "post_rewrite",
+                    "scope": "opening",
+                    "content": content,
+                    "seam_rewrite_info": seam_rewrite_info,
+                }
+            if self._requires_manual_seam_revision(seam_rewrite_info):
+                yield {
+                    "type": "needs_manual_revision",
+                    "reason": "seam_check_failed",
+                    "message": "章节接缝复检未通过，需要人工修订开头后再保存。",
+                    "content": content,
+                    "consistency_report": _consistency_report_to_dict(consistency_report),
+                    "token_count": context_tokens,
+                    "ghost_annotations": [ann.to_dict() for ann in ghost_annotations],
+                    "style_warnings": [
+                        {
+                            "pattern": hit.pattern,
+                            "text": hit.text,
+                            "start": hit.start,
+                            "end": hit.end,
+                            "severity": hit.severity,
+                        }
+                        for hit in style_warnings
+                    ],
+                    "seam_rewrite_info": seam_rewrite_info,
+                }
+                return
 
             token_count = context_tokens
             output_tokens = int(len(content) / 1.5)  # 预估输出 token
@@ -600,7 +1053,11 @@ class AutoNovelGenerationWorkflow:
                 "output_tokens": output_tokens,
                 "total_tokens": total_tokens,
                 "chars": len(content),
+                "target_word_count": target_word_count,
+                "actual_word_count": effective_length(content),
+                "word_control": self._serialize_word_control(word_control).to_dict() if word_control else None,
                 "ghost_annotations": [ann.to_dict() for ann in ghost_annotations],
+                "seam_rewrite_info": seam_rewrite_info,
                 "style_warnings": [
                     {
                         "pattern": hit.pattern,
@@ -642,7 +1099,7 @@ class AutoNovelGenerationWorkflow:
             )
             cfg = GenerationConfig(max_tokens=1024, temperature=0.7)
             out = await self.llm_service.generate(outline_prompt, cfg)
-            text = strip_reasoning_artifacts((out.content or "").strip())
+            text = (out.content or "").strip()
             if text:
                 return text
         except Exception as e:
@@ -743,7 +1200,7 @@ class AutoNovelGenerationWorkflow:
         total_beats: Optional[int] = None,
         beat_target_words: Optional[int] = None,
         voice_anchors: str = "",
-        chapter_draft_so_far: str = "",
+        target_word_count: Optional[int] = None,  # 【新增】用户设置的目标字数
     ) -> Prompt:
         """构建与 HTTP 单章 / 流式 / 托管按节拍写作一致的 Prompt（对外 API）。"""
         return self._build_prompt(
@@ -757,7 +1214,7 @@ class AutoNovelGenerationWorkflow:
             total_beats=total_beats,
             beat_target_words=beat_target_words,
             voice_anchors=voice_anchors,
-            chapter_draft_so_far=chapter_draft_so_far,
+            target_word_count=target_word_count,  # 【新增】传递目标字数
         )
 
     def _build_prompt(
@@ -773,7 +1230,7 @@ class AutoNovelGenerationWorkflow:
         total_beats: Optional[int] = None,
         beat_target_words: Optional[int] = None,
         voice_anchors: str = "",
-        chapter_draft_so_far: str = "",
+        target_word_count: Optional[int] = None,  # 【新增】用户设置的目标字数
     ) -> Prompt:
         """构建 LLM 提示词
 
@@ -787,7 +1244,6 @@ class AutoNovelGenerationWorkflow:
             beat_index / total_beats: 节拍序号（0-based / 总数）
             beat_target_words: 本段目标字数（分节拍时覆盖「整章 2000-3000 字」说明）
             voice_anchors: Bible 角色声线/小动作锚点（高优先级 System 提示）
-            chapter_draft_so_far: 同章内当前节拍之前已生成的正文（拼接后传入，避免后续节拍重复）
 
         Returns:
             Prompt 对象
@@ -810,6 +1266,44 @@ class AutoNovelGenerationWorkflow:
                 + "\n\n以上约束须与本章大纲及后文 Bible/摘要一致；不得与之矛盾。\n"
             )
 
+        # 题材专项指导（ThemeAgent 插槽）
+        theme_section = ""
+        if self.theme_agent:
+            try:
+                theme_directives = self.theme_agent.get_context_directives("", 0, outline)
+                theme_text = theme_directives.to_context_text() if theme_directives else ""
+                if theme_text:
+                    theme_section = f"\n【题材专项指导】\n{theme_text}\n\n"
+            except Exception as e:
+                logger.warning(f"ThemeAgent.get_context_directives 失败（降级跳过）：{e}")
+
+        # 题材专项上下文增强（含自定义技能）
+        skill_context = ""
+        if self.theme_agent:
+            try:
+                skill_context = self.theme_agent.invoke_skills_context(
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    outline=outline,
+                    existing_context=context
+                )
+            except Exception as e:
+                logger.warning(f"ThemeAgent.invoke_skills_context 失败：{e}")
+
+        # 题材专项 Prompt 增强（万能插槽）
+        prompt_enhancement = ""
+        if self.theme_agent:
+            try:
+                prompt_enhancement = self.theme_agent.invoke_skills_prompt(
+                    phase="system",
+                    current_prompt="",
+                    novel_id=novel_id,
+                    chapter_number=chapter_number,
+                    outline=outline,
+                )
+            except Exception as e:
+                logger.warning(f"ThemeAgent.invoke_skills_prompt 失败：{e}")
+
         voice_block = ""
         if va:
             voice_block = (
@@ -818,49 +1312,88 @@ class AutoNovelGenerationWorkflow:
             )
 
         beat_mode = bool((beat_prompt or "").strip())
-        prior_in_chapter = format_prior_draft_for_prompt(chapter_draft_so_far)
-        length_rule = (
-            f"7. 本段约 {beat_target_words} 字（本章分多节输出之一，勿写章节标题）"
-            if beat_target_words
-            else ("7. 章节长度：3000-4000字" if not beat_mode else "7. 按下方节拍说明控制篇幅，勿写章节标题")
-        )
+        
+        # 【关键修复】根据用户设置的 target_word_count 生成字数规则
+        if beat_mode and beat_target_words:
+            # 节拍模式：使用节拍的字数（加强约束）
+            beat_strict_max = int(beat_target_words * 1.1)  # 节拍最多允许超出10%
+            length_rule = (
+                f"7. 【节拍字数硬限制】本段必须控制在 {beat_target_words} 字左右，硬上限 {beat_strict_max} 字\n"
+                f"   你必须在此字数内完成本节拍的所有内容，包括收尾。\n"
+                f"   写到 {int(beat_target_words * 0.9)} 字时必须开始收尾，不再展开新内容。\n"
+                f"   禁止：添加额外场景、扩展背景描写、引入新角色、补充支线"
+            )
+        elif target_word_count is not None:
+            # 非节拍模式且有用户设置的目标字数：使用用户设置
+            check = self.word_control_service.check_word_count("", target_word_count)
+            strict_max = int(target_word_count * 1.1)  # 最多允许超出10%
+            length_rule = (
+                f"7. 【字数硬限制】本章必须控制在 {target_word_count} 字左右，硬上限 {strict_max} 字\n"
+                f"   你必须在此字数内完成本章所有内容，包括收尾。\n"
+                f"   写到 {int(target_word_count * 0.9)} 字时必须开始收尾段落，不再展开新支线。\n"
+                f"   禁止：添加额外场景、引入新角色、扩展背景描写、补充支线剧情"
+            )
+            logger.info(f"[字数控制] 目标={target_word_count}, 严格上限={strict_max}, 容差下限={check.min_allowed}")
+        else:
+            # 默认值
+            length_rule = "7. 章节长度：3000-4000字" if not beat_mode else "7. 按下方节拍说明控制篇幅，勿写章节标题"
         beat_extra = ""
         if beat_mode and beat_index is not None and total_beats is not None and total_beats > 0:
-            if prior_in_chapter:
-                beat_extra = (
-                    f"\n9. 本章第 {beat_index + 1}/{total_beats} 段：用户消息中「本章已生成正文」为当前章已写部分，"
-                    "请从其**之后**自然续写，不得复述或改写其中对白与已发生情节。\n"
-                )
-            else:
-                beat_extra = (
-                    f"\n9. 本章第 {beat_index + 1}/{total_beats} 段：与前后节拍连贯，避免同章内重复铺垫或重复对白。\n"
-                )
+            beat_extra = (
+                f"\n9. 这是本章第 {beat_index + 1}/{total_beats} 段输出；若非第一段，须承接上文语义，"
+                "不要重复已写内容。\n"
+            )
 
-        # ★ V6: 从 MemoryEngine 获取 fact_lock 文本块（T0 注入）
-        fact_lock = ""
-        if self.memory_engine:
+        # 题材人设：如有 ThemeAgent 且提供了专项人设，替换默认人设
+        persona = "你是一位专业的网络小说作家。根据以下上下文撰写章节内容。"
+        if self.theme_agent:
             try:
-                # 从 context 中提取 novel_id（通过 budget_allocator 传递）
-                # 这里用组合方式：FACT_LOCK + BEATS + CLUES 合并为一个文本块
-                fl = self.memory_engine.build_fact_lock_section(
-                    self._current_novel_id or "", self._current_chapter_number or 0
-                )
-                beats = self.memory_engine.get_completed_beats_section(
-                    self._current_novel_id or ""
-                )
-                clues = self.memory_engine.get_revealed_clues_section(
-                    self._current_novel_id or ""
-                )
-                parts = [p for p in [fl, beats, clues] if p.strip()]
-                fact_lock = "\n\n".join(parts) if parts else ""
+                custom_persona = self.theme_agent.get_system_persona()
+                if custom_persona:
+                    persona = f"{custom_persona}根据以下上下文撰写章节内容。"
             except Exception as e:
-                logger.warning(f"MemoryEngine fact_lock 构建失败: {e}")
+                logger.warning(f"ThemeAgent.get_system_persona 失败（使用默认人设）：{e}")
 
-        system_message = f"""你是一位专业的网络小说作家。根据以下上下文撰写章节内容。
+        # 题材专项写作规则
+        theme_rules_text = ""
+        if self.theme_agent:
+            try:
+                theme_rules = self.theme_agent.get_writing_rules()
+                if theme_rules:
+                    # 从第 9 条开始编号（默认规则 1-8 + beat_extra 可能占 9）
+                    start_num = 10 if beat_extra else 9
+                    theme_rules_lines = "\n".join(
+                        f"{start_num + i}. {rule}" for i, rule in enumerate(theme_rules)
+                    )
+                    theme_rules_text = f"\n{theme_rules_lines}"
+            except Exception as e:
+                logger.warning(f"ThemeAgent.get_writing_rules 失败（降级跳过）：{e}")
 
-{planning_section}{voice_block}{context}
+        # 【新增】用户自定义增强技能（最高优先级，放在最后确保被遵守）
+        custom_skill_instructions = ""
+        
+        # 优先使用传入的 prompt_enhancement（来自 theme_agent）
+        if prompt_enhancement:
+            custom_skill_instructions = f"\n\n【用户强制规则（最高优先级，必须严格遵守）】\n{prompt_enhancement}\n"
+            logger.debug(f"已注入自定义增强技能规则: {len(prompt_enhancement)} 字符")
+        elif hasattr(self, '_custom_skill_prompts') and self._custom_skill_prompts:
+            # 【关键修复】如果没有 theme_agent，使用缓存的自定义技能提示词
+            combined_prompts = "\n\n".join(self._custom_skill_prompts)
+            custom_skill_instructions = f"\n\n【用户强制规则（最高优先级，必须严格遵守）】\n{combined_prompts}\n"
+            logger.debug(f"已注入 {len(self._custom_skill_prompts)} 个自定义技能规则: {len(combined_prompts)} 字符")
 
-{fact_lock}
+        system_message = f"""{persona}
+{planning_section}{theme_section}{skill_context}{voice_block}{context}
+
+章节接缝约束：
+1. 本章开头必须优先承接"最近章节"中离当前最近一章的结尾状态，不能像新故事一样重新起势。
+2. 如果上一章结尾留下了动作、冲突、情绪或悬念，本章前 10%-15% 内容必须至少接住其中一项，并给出明确延续。
+3. 本章开头的时间、地点、人物状态如果发生变化，必须写出过渡原因，不能无跳板切场。
+4. 本章结尾必须同时做到两点：一是完成本章最核心的一步推进，二是留下可供下一章直接承接的钩子。
+5. 下一章可承接的钩子优先使用以下类型之一：新信息暴露、关系变化、决定落地、危机逼近、行动即将开始。
+6. 除非大纲明确要求大幅跳时空，否则不要让章节开头和上一章结尾在情绪、目标或局势上脱节。
+7. 如果上下文里出现"章末状态 / 章末情绪 / 必须承接 / 下一章开场提示"，这些内容优先级高于泛化发挥，必须显式体现在本章开头。
+
 写作要求：
 1. 必须有多个人物互动（至少2-3个角色出场）
 2. 必须有对话（不能只有独白和叙述）
@@ -869,7 +1402,8 @@ class AutoNovelGenerationWorkflow:
 5. 推进情节发展
 6. 使用生动的场景描写和细节
 {length_rule}
-8. 用中文写作，使用第三人称叙事{beat_extra}"""
+8. 用中文写作，使用第三人称叙事{beat_extra}{theme_rules_text}
+{custom_skill_instructions}"""
 
         user_message = f"""请根据以下大纲撰写本章内容：
 
@@ -881,29 +1415,21 @@ class AutoNovelGenerationWorkflow:
 - 必须有明确的冲突或戏剧张力
 - 场景要具体生动，不要空泛叙述
 - 推进主线情节，不要原地踏步
+- 开头先承接上一章末尾的局势/情绪/动作，不要重新铺一个无关开场
 - 结尾要有悬念或转折"""
 
-        if beat_mode and prior_in_chapter:
-            user_message += f"""
-
-【本章已生成正文（仅承接；禁止复述、改写或重复已交代的情节与对白；勿写章节标题）】
-{prior_in_chapter}
-"""
+        if target_word_count is not None and not beat_mode:
+            user_message += f"\n\n【再次强调】本章字数硬上限 {int(target_word_count * 1.1)} 字，写到 {int(target_word_count * 0.9)} 字时必须收尾，切勿超字数！"
 
         if beat_mode:
             bi = beat_index if beat_index is not None else 0
             tb = total_beats if total_beats is not None else 1
-            beat_tail = (
-                "本段只写该节拍对应正文，紧接上文已写正文之后继续，衔接自然。"
-                if prior_in_chapter
-                else "本段只写该节拍对应正文，与全章其它节拍情节连贯。"
-            )
             user_message += f"""
 
 【节拍 {bi + 1}/{tb}】
 {(beat_prompt or '').strip()}
 
-{beat_tail}"""
+本段只写该节拍对应正文，与上文衔接自然。"""
 
         user_message += "\n\n开始撰写："
 
@@ -987,6 +1513,326 @@ class AutoNovelGenerationWorkflow:
         except Exception as e:
             logger.warning(f"Consistency check failed: {e}")
             return ConsistencyReport(issues=[], warnings=[], suggestions=[])
+
+    def _review_chapter_seam(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        content: str,
+        base_report: ConsistencyReport,
+        rewrite_info: Optional[Dict[str, Any]] = None,
+    ) -> ConsistencyReport:
+        """生成后自动检查本章开头是否承接上一章结尾。"""
+        if chapter_number <= 1 or not content.strip():
+            return base_report
+
+        seam_context = self._get_previous_chapter_seam_context(novel_id, chapter_number)
+        if seam_context is None:
+            return base_report
+
+        anchor_text = seam_context["anchor_text"]
+        if not anchor_text:
+            return base_report
+
+        opening = self._extract_opening_for_seam_review(content)
+        if not opening:
+            return base_report
+
+        if self._opening_matches_previous_seam(opening, anchor_text):
+            return base_report
+
+        warnings = list(base_report.warnings)
+        suggestions = list(base_report.suggestions)
+        seam_desc = (
+            f"第{chapter_number}章开头未明显承接上一章收尾。"
+            f"应优先接住上一章的章末状态/问题/开场提示，而不是另起场面。"
+        )
+        warnings.append(
+            Issue(
+                type=IssueType.EVENT_LOGIC_ERROR,
+                severity=Severity.MINOR,
+                description=seam_desc,
+                location=chapter_number,
+            )
+        )
+        suggestions.append(
+            "重写本章前 10%-15%：直接回应上一章的章末状态、未解问题或下一章开场提示。"
+        )
+        if rewrite_info and rewrite_info.get("attempts", 0) > 0:
+            suggestions.append(
+                f"系统已尝试 {rewrite_info['attempts']} 次自动修复开头接缝，但仍未达到阈值，建议人工检查首段。"
+            )
+        return ConsistencyReport(
+            issues=list(base_report.issues),
+            warnings=warnings,
+            suggestions=suggestions,
+        )
+
+    def _get_previous_chapter_seam_context(
+        self,
+        novel_id: str,
+        chapter_number: int,
+    ) -> Optional[Dict[str, Any]]:
+        knowledge_repo = getattr(self.context_builder, "knowledge_repository", None)
+        if knowledge_repo is None:
+            return None
+
+        try:
+            knowledge = knowledge_repo.get_by_novel_id(novel_id)
+        except Exception as e:
+            logger.debug("chapter seam context load failed: %s", e)
+            return None
+
+        if not knowledge:
+            return None
+
+        previous = None
+        for ch in knowledge.chapters:
+            if getattr(ch, "chapter_id", None) == chapter_number - 1:
+                previous = ch
+                break
+        if previous is None:
+            return None
+
+        anchors = [
+            getattr(previous, "ending_state", "") or "",
+            getattr(previous, "ending_emotion", "") or "",
+            getattr(previous, "carry_over_question", "") or "",
+            getattr(previous, "next_opening_hint", "") or "",
+        ]
+        anchor_text = "\n".join(x.strip() for x in anchors if x and x.strip()).strip()
+        if not anchor_text:
+            return None
+        return {
+            "previous": previous,
+            "anchor_text": anchor_text,
+        }
+
+    async def _apply_seam_rewrite_loop(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+        content: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        info = {"attempts": 0, "applied": False, "status": "skipped"}
+        if chapter_number <= 1 or not content.strip():
+            return content, info
+
+        seam_context = self._get_previous_chapter_seam_context(novel_id, chapter_number)
+        if seam_context is None:
+            return content, info
+
+        current_content = content
+        for attempt in range(1, 3):
+            opening = self._extract_opening_for_seam_review(current_content)
+            if opening and self._opening_matches_previous_seam(opening, seam_context["anchor_text"]):
+                info["status"] = "passed"
+                return current_content, info
+
+            rewritten = await self._rewrite_chapter_opening_for_seam(
+                novel_id=novel_id,
+                chapter_number=chapter_number,
+                outline=outline,
+                content=current_content,
+                seam_context=seam_context,
+                attempt=attempt,
+            )
+            info["attempts"] = attempt
+            if not rewritten or rewritten.strip() == current_content.strip():
+                info["status"] = "failed_after_rewrite"
+                return current_content, info
+            current_content = rewritten
+            info["applied"] = True
+
+        final_opening = self._extract_opening_for_seam_review(current_content)
+        info["status"] = (
+            "passed_after_rewrite"
+            if final_opening and self._opening_matches_previous_seam(final_opening, seam_context["anchor_text"])
+            else "failed_after_rewrite"
+        )
+        return current_content, info
+
+    async def _rewrite_chapter_opening_for_seam(
+        self,
+        *,
+        novel_id: str,
+        chapter_number: int,
+        outline: str,
+        content: str,
+        seam_context: Dict[str, Any],
+        attempt: int,
+    ) -> Optional[str]:
+        """重写章节开头以匹配上一章接缝
+
+        根据上一章的接缝数据（ending_state, ending_emotion, carry_over_question 等）
+        重写当前章节的开头，确保章节之间的连贯性。
+
+        Args:
+            novel_id: 小说 ID
+            chapter_number: 章节号
+            outline: 章节大纲
+            content: 章节内容
+            seam_context: 接缝上下文，包含上一章的摘要和接缝数据
+            attempt: 重写尝试次数
+
+        Returns:
+            重写后的内容，如果重写失败则返回 None
+        """
+        # 修复问题 3：将冗余的防御性检查改为断言，明确不变量
+        assert self.llm_service, "llm_service is required"
+
+        opening, remainder = self._split_opening_for_rewrite(content)
+        if not opening or not remainder:
+            return None
+
+        previous = seam_context["previous"]
+        previous_block = "\n".join(
+            [
+                f"上一章摘要：{getattr(previous, 'summary', '') or '（无）'}",
+                f"上一章未解问题：{getattr(previous, 'open_threads', '') or '（无）'}",
+                f"上一章章末状态：{getattr(previous, 'ending_state', '') or '（无）'}",
+                f"上一章章末情绪：{getattr(previous, 'ending_emotion', '') or '（无）'}",
+                f"本章必须承接：{getattr(previous, 'carry_over_question', '') or '（无）'}",
+                f"建议开场提示：{getattr(previous, 'next_opening_hint', '') or '（无）'}",
+            ]
+        )
+        continuation = remainder[:700].strip()
+        prompt = Prompt(
+            system="""你是小说接缝修订编辑。你的任务不是重写整章，而是只修订章节开头，使其严密承接上一章结尾。
+
+必须遵守：
+1. 只输出“修订后的开头片段”，不要输出整章，不要解释。
+2. 必须承接上一章的章末状态、情绪或未解问题，不能另起炉灶。
+3. 不得改变本章既有剧情事实、角色关系、信息结论和后文走向。
+4. 必须与后续正文自然衔接，不能和后文打架，不能重复后文已写内容。
+5. 允许补一个过渡动作、承接对话、情绪延续或场景切换理由，但不要扩写新支线。""",
+            user=f"""当前正在修订第 {chapter_number} 章开头，第 {attempt} 次尝试。
+
+【上一章接缝卡】
+{previous_block}
+
+【本章大纲】
+{outline}
+
+【当前开头片段】
+{opening}
+
+【后续正文起始（仅供衔接，不可照抄重复）】
+{continuation}
+
+请只输出修订后的开头片段。""",
+        )
+        config = GenerationConfig(
+            max_tokens=max(800, min(2200, int(len(opening) * 1.8))),
+            temperature=0.3,
+        )
+        try:
+            result = await self.llm_service.generate(prompt, config)
+        except Exception as e:
+            logger.warning("chapter seam rewrite failed novel=%s ch=%s attempt=%s: %s", novel_id, chapter_number, attempt, e)
+            return None
+
+        rewritten_opening = (result.content or "").strip()
+        if not rewritten_opening:
+            return None
+        rewritten_opening = self._trim_duplicate_boundary(rewritten_opening, remainder)
+        return rewritten_opening.rstrip() + "\n\n" + remainder.lstrip()
+
+    @staticmethod
+    def _split_opening_for_rewrite(content: str) -> tuple[str, str]:
+        text = (content or "").strip()
+        if not text:
+            return "", ""
+        split_idx = max(220, min(950, int(len(text) * 0.14)))
+        boundary = text.rfind("\n\n", 0, split_idx + 120)
+        if boundary == -1:
+            boundary = text.find("\n\n", split_idx)
+        if boundary == -1:
+            boundary = split_idx
+        opening = text[:boundary].strip()
+        remainder = text[boundary:].strip()
+        if len(opening) < 120 or len(remainder) < 120:
+            return "", ""
+        return opening, remainder
+
+    @classmethod
+    def _trim_duplicate_boundary(cls, rewritten_opening: str, remainder: str) -> str:
+        candidate = rewritten_opening.rstrip()
+        remainder_head = (remainder or "").lstrip()[:120]
+        remainder_norm = cls._normalize_seam_text(remainder_head)
+        if not remainder_norm:
+            return candidate
+        lines = [line.rstrip() for line in candidate.splitlines() if line.strip()]
+        while lines:
+            last = lines[-1]
+            last_norm = cls._normalize_seam_text(last)
+            if last_norm and (last_norm in remainder_norm or remainder_norm.startswith(last_norm)):
+                lines.pop()
+                continue
+            break
+        return "\n".join(lines).strip() or candidate
+
+    @staticmethod
+    def _extract_opening_for_seam_review(content: str, max_chars: int = 650) -> str:
+        text = (content or "").strip()
+        if not text:
+            return ""
+        head = text[:max_chars]
+        parts = re.split(r"\n\s*\n", head)
+        if parts:
+            first_block = parts[0].strip()
+            if len(first_block) >= 80:
+                return first_block
+        return head
+
+    @staticmethod
+    def _normalize_seam_text(text: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", (text or "").lower())
+
+    @classmethod
+    def _bigram_set(cls, text: str) -> set[str]:
+        normalized = cls._normalize_seam_text(text)
+        if len(normalized) < 2:
+            return set()
+        return {normalized[i:i + 2] for i in range(len(normalized) - 1)}
+
+    @classmethod
+    def _opening_matches_previous_seam(cls, opening: str, anchor_text: str) -> bool:
+        opening_norm = cls._normalize_seam_text(opening)
+        if not opening_norm:
+            return False
+
+        # 优先短语直接命中
+        fragments = [
+            frag.strip()
+            for frag in re.split(r"[，。；：！？、“”\"'\s]+", anchor_text)
+            if len(frag.strip()) >= 3
+        ]
+        direct_hits = 0
+        for frag in fragments[:12]:
+            norm_frag = cls._normalize_seam_text(frag)
+            if norm_frag and norm_frag in opening_norm:
+                direct_hits += 1
+        if direct_hits >= 1:
+            return True
+
+        # 回退到双字片段重合，降低对措辞改写的敏感度
+        opening_bigrams = cls._bigram_set(opening)
+        anchor_bigrams = cls._bigram_set(anchor_text)
+        if not opening_bigrams or not anchor_bigrams:
+            return False
+        overlap = opening_bigrams & anchor_bigrams
+        overlap_ratio = len(overlap) / max(1, min(len(anchor_bigrams), 12))
+        return len(overlap) >= 2 and overlap_ratio >= 0.2
+
+    @staticmethod
+    def _requires_manual_seam_revision(seam_rewrite_info: Optional[Dict[str, Any]]) -> bool:
+        if not seam_rewrite_info:
+            return False
+        return str(seam_rewrite_info.get("status") or "") == "failed_after_rewrite"
 
     def _detect_conflicts(
         self,

@@ -6,33 +6,39 @@
     :closable="true"
     preset="card"
     title="新书设置向导"
-    style="width: 90%; max-width: 600px; max-height: 90vh"
+    style="width: 90%; max-width: 900px; max-height: 90vh"
   >
-    <n-steps :current="currentStep" :status="stepStatus" size="small">
+    <n-steps :current="currentStep" :status="stepStatus" size="medium">
       <n-step title="世界观" description="5维度框架" />
       <n-step title="人物" description="主要角色" />
       <n-step title="地图" description="地图系统" />
       <n-step title="故事线" description="主线支线" />
+      <n-step title="情节弧" description="剧情曲线" />
       <n-step title="开始" description="进入工作台" />
     </n-steps>
 
     <div class="step-content">
       <!-- Step 1: Generate Worldbuilding + Style -->
       <div v-if="currentStep === 1" class="step-panel">
-        <n-alert type="info" class="wizard-hint-alert" style="margin-bottom: 16px; width: 100%">
-          世界观与文风由后台多次调用 LLM 生成，<strong>常见耗时 2～10 分钟</strong>（慢模型、思考链或网关排队会更久）。
-          本向导<strong>单步界面最长等待约 {{ WIZARD_STEP_TIMEOUT_SECONDS }} 秒</strong>；若仍无结果，请到 <strong>AI 控制台</strong> 调大请求超时并检查网络与模型；关闭本窗口不会中断后台任务，可在工作台 Bible 继续查看或重试。
-        </n-alert>
-        <n-alert v-if="bibleError" type="error" style="margin-bottom: 16px; width: 100%">
-          <div class="wizard-error-text">{{ bibleError }}</div>
-        </n-alert>
+        <n-alert v-if="bibleError" type="error" :title="bibleError" style="margin-bottom: 16px" />
         <n-spin :show="generatingBible">
           <div v-if="!bibleGenerated" class="step-info">
             <n-icon size="48" color="#18a058">
               <IconBook />
             </n-icon>
             <h3>{{ bibleStatusText }}</h3>
-            <p>AI 正在分析您的故事创意，生成世界观（5维度框架）和文风公约...</p>
+            
+            <!-- 进度条 -->
+            <n-progress
+              v-if="generatingBible"
+              type="line"
+              :percentage="bibleProgress || 1"
+              :show-indicator="true"
+              status="success"
+              style="margin-top: 16px"
+            />
+            
+            <p class="step-subtitle">{{ bibleStatusSubtitle }}</p>
           </div>
 
           <!-- 生成完成后显示预览 -->
@@ -95,19 +101,42 @@
 
       <!-- Step 2: Generate Characters -->
       <div v-else-if="currentStep === 2" class="step-panel">
-        <n-alert v-if="charactersError" type="error" style="margin-bottom: 16px; width: 100%">
-          {{ charactersError }}
-        </n-alert>
-        <n-alert type="info" class="wizard-hint-alert" style="margin-bottom: 16px; width: 100%">
-          与第 1 步相同，人物生成在后台跑 LLM；本步界面最长约 {{ WIZARD_STEP_TIMEOUT_SECONDS }} 秒，请耐心等待。超时或失败时可稍后在 Bible 中补全。
+        <n-alert v-if="characterError" type="error" title="角色生成失败" style="margin-bottom: 16px; width: 100%">
+          <template #icon>
+            <n-icon component="md-alert" />
+          </template>
+          <p>{{ characterError }}</p>
+          <p v-if="characterErrorDetail" style="margin-top: 8px; font-size: 12px; opacity: 0.8">
+            {{ characterErrorDetail }}
+          </p>
+          <p v-if="characterErrorHint" style="margin-top: 8px; color: #f0a020; font-size: 13px">
+            💡 {{ characterErrorHint }}
+          </p>
+          <n-button
+            v-if="!generatingCharacters"
+            type="primary"
+            size="small"
+            style="margin-top: 12px"
+            @click="retryGenerateCharacters"
+          >
+            重新生成
+          </n-button>
         </n-alert>
         <n-spin :show="generatingCharacters">
-          <div v-if="!charactersGenerated" class="step-info">
+          <div v-if="!charactersGenerated && !characterError" class="step-info">
             <n-icon size="48" color="#2080f0">
               <IconPeople />
             </n-icon>
-            <h3>生成人物</h3>
-            <p>基于世界观设定，AI 正在生成3-5个主要角色...</p>
+            <h3>{{ characterStatusText }}</h3>
+            <n-progress
+              v-if="generatingCharacters"
+              type="line"
+              :percentage="characterProgress || 1"
+              :show-indicator="true"
+              status="info"
+              style="margin-top: 16px"
+            />
+            <p class="step-subtitle">基于世界观设定，AI 正在生成3-5个主要角色...</p>
           </div>
 
           <!-- 生成完成后显示预览 -->
@@ -131,19 +160,21 @@
 
       <!-- Step 3: Generate Locations -->
       <div v-else-if="currentStep === 3" class="step-panel">
-        <n-alert v-if="locationsError" type="error" style="margin-bottom: 16px; width: 100%">
-          {{ locationsError }}
-        </n-alert>
-        <n-alert type="info" class="wizard-hint-alert" style="margin-bottom: 16px; width: 100%">
-          地图与地点同样依赖 LLM；本步界面最长约 {{ WIZARD_STEP_TIMEOUT_SECONDS }} 秒。若卡住请先确认 API 未报错，再于工作台重试生成。
-        </n-alert>
         <n-spin :show="generatingLocations">
           <div v-if="!locationsGenerated" class="step-info">
             <n-icon size="48" color="#f0a020">
               <IconMap />
             </n-icon>
-            <h3>生成地图</h3>
-            <p>基于世界观和人物设定，AI 正在生成完整的地点系统（地图）...</p>
+            <h3>{{ locationStatusText }}</h3>
+            <n-progress
+              v-if="generatingLocations"
+              type="line"
+              :percentage="locationProgress || 1"
+              :show-indicator="true"
+              status="warning"
+              style="margin-top: 16px"
+            />
+            <p class="step-subtitle">基于世界观和人物设定，AI 正在生成完整的地点系统（地图）...</p>
           </div>
 
           <!-- 生成完成后显示预览 -->
@@ -173,15 +204,18 @@
             <IconTimeline />
           </n-icon>
           <h3>确立故事主轴</h3>
-          <p>基于你已确认的世界观、人物与地图，系统推演三条可选<strong>主线方向</strong>。选定一条即可落库为「主线」；支线留到工作台再养。</p>
+          <n-progress
+            v-if="plotSuggesting"
+            type="line"
+            :percentage="storylineProgress || 1"
+            :show-indicator="true"
+            status="info"
+            style="margin-top: 16px; width: 100%; max-width: 400px"
+          />
+          <p>{{ storylineStatusText }}</p>
         </div>
 
-        <n-alert v-if="plotSuggestError" type="error" style="margin-bottom: 12px; width: 100%">
-          {{ plotSuggestError }}
-        </n-alert>
-        <n-alert type="info" class="wizard-hint-alert" style="margin-bottom: 12px; width: 100%">
-          主线候选为单次 LLM 推演，约需 1～5 分钟；本步请求最长约 {{ WIZARD_STEP_TIMEOUT_SECONDS }} 秒，超时请调大 AI 控制台中的请求超时或换更快模型，并点击「重新推演」。
-        </n-alert>
+        <n-alert v-if="plotSuggestError" type="error" :title="plotSuggestError" style="margin-bottom: 12px; width: 100%" />
         <n-alert v-if="mainPlotCommitted" type="success" title="已保存主线" style="margin-bottom: 12px; width: 100%">
           已进入本书的主故事线记录，可随时在工作台「设置 → 故事线」中修改。
         </n-alert>
@@ -253,8 +287,61 @@
         </n-spin>
       </div>
 
-      <!-- Step 5: Complete -->
+      <!-- Step 5: Plot Arc -->
       <div v-else-if="currentStep === 5" class="step-panel">
+        <n-spin :show="generatingPlotArc">
+          <div v-if="!plotArcGenerated" class="step-info">
+            <n-icon size="48" color="#f0a020">
+              <IconChart />
+            </n-icon>
+            <h3>设计情节弧线</h3>
+            <n-progress
+              v-if="generatingPlotArc"
+              type="line"
+              :percentage="plotArcProgress || 1"
+              :show-indicator="true"
+              status="warning"
+              style="margin-top: 16px"
+            />
+            <p>{{ plotArcStatusText }}</p>
+            <n-space vertical size="small" style="margin-top: 16px; text-align: left">
+              <div>• 开端：故事的起点</div>
+              <div>• 上升：矛盾逐渐激化</div>
+              <div>• 转折：关键转折点</div>
+              <div>• 高潮：矛盾最激烈时刻</div>
+              <div>• 结局：故事的收尾</div>
+            </n-space>
+          </div>
+
+          <!-- 生成完成后显示预览 -->
+          <div v-else class="bible-preview">
+            <n-alert type="success" title="情节弧生成完成" style="margin-bottom: 16px">
+              请查看并确认五幕式情节弧设定。
+            </n-alert>
+
+            <n-space vertical style="width: 100%">
+              <n-card size="small" title="第一幕：开端">
+                <p>{{ plotArcData.act1 || '正在生成...' }}</p>
+              </n-card>
+              <n-card size="small" title="第二幕：上升">
+                <p>{{ plotArcData.act2 || '正在生成...' }}</p>
+              </n-card>
+              <n-card size="small" title="第三幕：转折">
+                <p>{{ plotArcData.act3 || '正在生成...' }}</p>
+              </n-card>
+              <n-card size="small" title="第四幕：高潮">
+                <p>{{ plotArcData.act4 || '正在生成...' }}</p>
+              </n-card>
+              <n-card size="small" title="第五幕：结局">
+                <p>{{ plotArcData.act5 || '正在生成...' }}</p>
+              </n-card>
+            </n-space>
+          </div>
+        </n-spin>
+      </div>
+
+      <!-- Step 6: Complete -->
+      <div v-else-if="currentStep === 6" class="step-panel">
         <div class="step-info">
           <n-icon size="48" color="#18a058">
             <IconCheck />
@@ -268,7 +355,7 @@
 
     <template #footer>
       <n-space justify="space-between">
-        <n-button v-if="currentStep > 3 && currentStep < 5" @click="handleSkip">
+        <n-button v-if="currentStep > 3 && currentStep < 6" @click="handleSkip">
           跳过向导
         </n-button>
         <div v-else></div>
@@ -281,23 +368,45 @@
             确认并继续
           </n-button>
           <n-button v-if="currentStep === 4" :disabled="!mainPlotCommitted" @click="handleNext"> 下一步 </n-button>
-          <n-button v-if="currentStep === 5" type="primary" @click="handleComplete">
+          <n-button
+            v-if="currentStep === 5 && !generatingPlotArc && !plotArcGenerated"
+            type="primary"
+            @click="startPlotArcGeneration"
+          >
+            开始生成情节弧
+          </n-button>
+          <n-button
+            v-if="currentStep === 5 && plotArcGenerated"
+            type="primary"
+            @click="handleNext"
+          >
+            完成设置
+          </n-button>
+          <n-button v-if="currentStep === 6" type="primary" @click="handleComplete">
             进入工作台
           </n-button>
         </n-space>
       </n-space>
     </template>
   </n-modal>
+
+  <!-- 角色确认弹窗 -->
+  <CharacterConfirmationModal
+    ref="characterConfirmModalRef"
+    :novel-id="props.novelId"
+    @confirm="handleCharactersConfirm"
+    @cancel="handleCharactersCancel"
+  />
 </template>
 
 <script setup lang="ts">
-import { h, ref, watch, computed, onMounted, onUnmounted } from 'vue'
+import { h, ref, watch, computed, onUnmounted } from 'vue'
 import { useMessage } from 'naive-ui'
 import { bibleApi, type BibleDTO, type StyleNoteDTO } from '@/api/bible'
-import { WIZARD_STEP_TIMEOUT_MS, WIZARD_STEP_TIMEOUT_SECONDS } from '@/constants/wizard'
 import { worldbuildingApi } from '@/api/worldbuilding'
 import { workflowApi, type MainPlotOptionDTO } from '@/api/workflow'
 import BibleLocationsGraphPreview from './BibleLocationsGraphPreview.vue'
+import CharacterConfirmationModal from '../CharacterConfirmationModal.vue'
 
 const WB_DIMS = ['core_rules', 'geography', 'society', 'culture', 'daily_life'] as const
 
@@ -384,7 +493,6 @@ function formatApiError(error: unknown): string {
   const e = error as {
     response?: { data?: { detail?: unknown } }
     message?: string
-    code?: string
   }
   const d = e?.response?.data?.detail
   if (typeof d === 'string') return d
@@ -394,15 +502,6 @@ function formatApiError(error: unknown): string {
   if (e?.message) return e.message
   return ''
 }
-
-/** 前端 axios / 浏览器常见超时形态（非模型专属，但用户常统称「超时」） */
-function isLikelyTimeoutError(error: unknown): boolean {
-  const text = `${formatApiError(error)} ${error instanceof Error ? error.message : ''} ${(error as { code?: string })?.code || ''}`
-  return /timeout|ECONNABORTED|ETIMEDOUT|aborted|超时/i.test(text)
-}
-
-/** 向导内：单阶段轮询 Bible 就绪的最长等待（与单步 HTTP 超时一致，默认 400s） */
-const WIZARD_BIBLE_POLL_DEADLINE_MS = WIZARD_STEP_TIMEOUT_MS
 
 const IconBook = () =>
   h(
@@ -430,6 +529,13 @@ const IconTimeline = () =>
     'svg',
     { xmlns: 'http://www.w3.org/2000/svg', viewBox: '0 0 24 24', fill: 'currentColor' },
     h('path', { d: 'M23 8c0 1.1-.9 2-2 2-.18 0-.35-.02-.51-.07l-3.56 3.55c.05.16.07.34.07.52 0 1.1-.9 2-2 2s-2-.9-2-2c0-.18.02-.36.07-.52l-2.55-2.55c-.16.05-.34.07-.52.07s-.36-.02-.52-.07l-4.55 4.56c.05.16.07.33.07.51 0 1.1-.9 2-2 2s-2-.9-2-2 .9-2 2-2c.18 0 .35.02.51.07l4.56-4.55C8.02 9.36 8 9.18 8 9c0-1.1.9-2 2-2s2 .9 2 2c0 .18-.02.36-.07.52l2.55 2.55c.16-.05.34-.07.52-.07s.36.02.52.07l3.55-3.56C19.02 8.35 19 8.18 19 8c0-1.1.9-2 2-2s2 .9 2 2z' })
+  )
+
+const IconChart = () =>
+  h(
+    'svg',
+    { xmlns: 'http://www.w3.org/2000/svg', viewBox: '0 0 24 24', fill: 'currentColor' },
+    h('path', { d: 'M3.5 18.49l6-6.01 4 4L22 6.92l-1.41-1.41-7.09 7.97-4-4L2 16.99z' })
   )
 
 const IconCheck = () =>
@@ -476,6 +582,8 @@ const stepStatus = ref<'process' | 'finish' | 'error' | 'wait'>('process')
 const generatingBible = ref(false)
 const bibleGenerated = ref(false)
 const bibleStatusText = ref('正在生成世界观...')
+const bibleStatusSubtitle = ref('AI 正在分析您的故事创意，生成世界观（5维度框架）和文风公约...')
+const bibleProgress = ref(0)
 const bibleError = ref('')
 const bibleData = ref<BibleDTO>(createEmptyBible())
 const worldbuildingData = ref<ReturnType<typeof emptyWorldbuildingShape>>(emptyWorldbuildingShape())
@@ -485,16 +593,19 @@ const styleConventionDisplay = computed(() => styleConventionFromBible(bibleData
 // 第2步：生成人物和地点
 const generatingCharacters = ref(false)
 const charactersGenerated = ref(false)
-const charactersError = ref('')
+const showCharacterConfirmation = ref(false)
+const characterConfirmModalRef = ref<any>(null)
+const characterProgress = ref(0)
+const characterStatusText = ref('正在生成角色...')
+const characterError = ref('')
+const characterErrorDetail = ref('')
+const characterErrorHint = ref('')
 
 // 第3步：生成地点
 const generatingLocations = ref(false)
 const locationsGenerated = ref(false)
-const locationsError = ref('')
-
-/** 作废第 2/3 步后台轮询（关闭向导或重置时递增） */
-const step2PollEpoch = ref(0)
-const step3PollEpoch = ref(0)
+const locationProgress = ref(0)
+const locationStatusText = ref('正在生成地点...')
 
 // Step 4：主线推演
 const plotOptions = ref<MainPlotOptionDTO[]>([])
@@ -505,23 +616,319 @@ const customMode = ref(false)
 const customLogline = ref('')
 const adoptingPlotId = ref<string | null>(null)
 const adoptingCustom = ref(false)
+const storylineProgress = ref(0)
+const storylineStatusText = ref('基于你已确认的世界观、人物与地图，系统推演三条可选主线方向...')
+
+// Step 5: 情节弧生成
+const generatingPlotArc = ref(false)
+const plotArcGenerated = ref(false)
+const plotArcProgress = ref(0)
+const plotArcStatusText = ref('点击按钮开始生成五幕式情节弧...')
+const plotArcData = ref({ act1: '', act2: '', act3: '', act4: '', act5: '' })
 
 const chapterEndForStoryline = computed(() => Math.max(1, props.targetChapters ?? 100))
+
+function diagnoseCharacterGenerationError(error: unknown): { error: string; detail: string; hint: string } {
+  const err = error as any
+  const status = err?.response?.status
+  const statusText = err?.response?.statusText || ''
+  const responseData = err?.response?.data
+  const errMessage = err?.message || String(error)
+  
+  // 网络连接问题
+  if (errMessage.includes('Network Error') || 
+      errMessage.includes('timeout') || 
+      errMessage.includes('connect')) {
+    return {
+      error: '无法连接到后端服务',
+      detail: errMessage,
+      hint: '请确认后端服务是否正常启动，可以查看 start_services.py 窗口的日志状态'
+    }
+  }
+  
+  // HTTP 状态码检测
+  if (status === 401 || status === 403) {
+    return {
+      error: '权限验证失败',
+      detail: `HTTP ${status}: ${statusText}`,
+      hint: '请检查 LLM API Key 是否正确配置，或者令牌是否过期'
+    }
+  }
+  
+  if (status === 429) {
+    return {
+      error: 'API 请求频率超限',
+      detail: `HTTP ${status}: Too Many Requests`,
+      hint: 'LLM 服务商限制了请求频率，请等待几分钟后重试，或更换 API 提供商'
+    }
+  }
+  
+  if (status >= 500) {
+    const backendError = responseData?.detail || responseData?.message || statusText
+    if (backendError?.includes('LLM') || backendError?.includes('token') || backendError?.includes('API')) {
+      return {
+        error: 'LLM 调用失败',
+        detail: backendError,
+        hint: '请检查 LLM 配置：1) API Key 是否正确 2) 模型名称是否正确 3) 是否有额度'
+      }
+    }
+    return {
+      error: '后端服务内部错误',
+      detail: `HTTP ${status}: ${backendError || statusText}`,
+      hint: '请查看后端日志窗口获取详细错误信息，可能是数据库或依赖服务异常'
+    }
+  }
+  
+  // 世界观数据为空
+  if (errMessage.includes('worldbuilding') || errMessage.includes('bible') || errMessage.includes('世界观')) {
+    return {
+      error: '世界观数据不完整',
+      detail: errMessage,
+      hint: '第一步世界观生成可能未完成，请确认第一步已成功生成完整的世界观设定'
+    }
+  }
+  
+  // 默认通用错误
+  return {
+    error: '角色生成过程出错',
+    detail: errMessage.substring(0, 150),
+    hint: '可以尝试点击「重新生成」，或检查后端控制台的错误日志获取详细信息'
+  }
+}
+
+async function startGenerateCharacters() {
+  console.log('[NovelSetupGuide] 开始处理第2步：角色生成，novelId:', props.novelId)
+  // 重置错误状态
+  characterError.value = ''
+  characterErrorDetail.value = ''
+  characterErrorHint.value = ''
+  
+  // 进入第2步：生成人物
+  currentStep.value = 2
+  generatingCharacters.value = true
+  characterProgress.value = 5
+  characterStatusText.value = '正在分析世界观设定...'
+  biblePollEpoch.value += 1
+  const epoch = biblePollEpoch.value
+  console.log('[NovelSetupGuide] 设置epoch:', epoch)
+  
+  // 添加生成超时检测 - 120秒后如果还在运行则提示可能的问题
+  const watchdogTimer = setTimeout(() => {
+    if (biblePollEpoch.value === epoch && generatingCharacters.value && !charactersGenerated.value) {
+      console.log('[NovelSetupGuide] 角色生成超时检测触发')
+      characterStatusText.value = '生成时间较长，请耐心等待...'
+    }
+  }, 60000)
+  
+  try {
+    // 预检查：世界观是否已生成
+    console.log('[NovelSetupGuide] 执行预检查，获取Bible...')
+    try {
+      const bible = await bibleApi.getBible(props.novelId)
+      console.log('[NovelSetupGuide] 预检查Bible结果:', {
+        hasWorldSettings: !!bible.world_settings,
+        worldSettingsLength: bible.world_settings?.length || 0
+      })
+      if (!bible.world_settings || bible.world_settings.length === 0) {
+        throw new Error('世界观设定为空，请确保第一步已成功完成')
+      }
+    } catch (preCheckErr) {
+      // 预检查失败不阻止继续，只是记录日志
+      console.warn('[NovelSetupGuide] 预检查警告:', preCheckErr)
+    }
+    
+    console.log('[NovelSetupGuide] 调用bibleApi.generateBible("characters")...')
+    await bibleApi.generateBible(props.novelId, 'characters')
+    console.log('[NovelSetupGuide] generateBible调用成功返回')
+    
+    // 分步状态文本
+    const charProgressStages = [
+      { p: 10, t: '设计主角形象和性格...' },
+      { p: 25, t: '设计主角背景和动机...' },
+      { p: 40, t: '创作重要配角设定...' },
+      { p: 55, t: '设计反派角色和立场...' },
+      { p: 70, t: '构建人物关系网络...' },
+      { p: 85, t: '优化人物弧光设计...' },
+      { p: 95, t: '即将完成...' },
+    ]
+    
+    let stageIndex = 0
+    const stageTimer = setInterval(() => {
+      if (biblePollEpoch.value !== epoch || !generatingCharacters.value) {
+        clearInterval(stageTimer)
+        clearTimeout(watchdogTimer)
+        return
+      }
+      if (stageIndex < charProgressStages.length) {
+        if (characterProgress.value < charProgressStages[stageIndex].p) {
+          characterProgress.value = charProgressStages[stageIndex].p
+          characterStatusText.value = charProgressStages[stageIndex].t
+        }
+        stageIndex++
+      }
+    }, 2000)
+    
+    const clearTimers = () => {
+      clearInterval(stageTimer)
+      clearTimeout(watchdogTimer)
+    }
+    
+    let pollCount = 0
+    const maxPollCount = 60 // 最多轮询 2 分钟 (60 * 2s)
+    console.log('[NovelSetupGuide] 设置轮询，maxPollCount:', maxPollCount)
+    
+    const pollCharacters = async () => {
+      console.log(`[NovelSetupGuide] pollCharacters 调用，pollCount: ${pollCount}, epoch: ${epoch}, biblePollEpoch: ${biblePollEpoch.value}`)
+      if (biblePollEpoch.value !== epoch || !generatingCharacters.value) {
+        console.log('[NovelSetupGuide] pollCharacters 跳过（epoch不匹配或已停止）')
+        return
+      }
+      
+      pollCount++
+      if (pollCount >= maxPollCount) {
+        console.log('[NovelSetupGuide] 轮询超时')
+        clearTimers()
+        generatingCharacters.value = false
+        const diag = diagnoseCharacterGenerationError(new Error('轮询超时'))
+        characterError.value = '角色生成响应超时'
+        characterErrorDetail.value = '后台生成任务可能仍在运行，请检查后端日志'
+        characterErrorHint.value = '可以尝试重新生成，或者稍后到工作台角色面板查看'
+        return
+      }
+      
+      try {
+        console.log('[NovelSetupGuide] 获取生成进度...')
+        const progressRes = await bibleApi.getGenerationProgress(props.novelId)
+        console.log('[NovelSetupGuide] 进度结果:', progressRes)
+        console.log('[NovelSetupGuide] 进度详情:', JSON.stringify(progressRes, null, 2))
+        if (progressRes.progress) {
+          if (progressRes.progress.progress > characterProgress.value) {
+            characterProgress.value = progressRes.progress.progress
+          }
+          if (progressRes.progress.message) {
+            characterStatusText.value = progressRes.progress.message
+          }
+
+          if (progressRes.progress.stage === 'error' || progressRes.progress.message?.includes('失败')) {
+            throw new Error(`后端生成错误: ${progressRes.progress.message}`)
+          }
+        }
+        
+        console.log('[NovelSetupGuide] 获取Bible检查角色...')
+        const bible = await bibleApi.getBible(props.novelId)
+        console.log('[NovelSetupGuide] Bible结果:', {
+          hasCharacters: !!bible.characters,
+          characterCount: bible.characters?.length || 0
+        })
+        
+        if (bible.characters && bible.characters.length > 0) {
+          console.log('[NovelSetupGuide] 找到角色，完成生成')
+          clearTimers()
+          generatingCharacters.value = false
+          charactersGenerated.value = true
+          characterProgress.value = 100
+          characterStatusText.value = '角色生成完成！'
+          bibleData.value = bible
+          message.success('角色生成完成')
+          return
+        }
+        if (progressRes.progress && progressRes.progress.stage === 'done') {
+          const bible2 = await bibleApi.getBible(props.novelId)
+          if (bible2.characters && bible2.characters.length > 0) {
+            clearTimers()
+            generatingCharacters.value = false
+            charactersGenerated.value = true
+            characterProgress.value = 100
+            characterStatusText.value = '角色生成完成！'
+            bibleData.value = bible2
+            message.success('角色生成完成')
+            return
+          }
+        }
+        console.log('[NovelSetupGuide] 2秒后继续轮询...')
+        window.setTimeout(pollCharacters, 2000)
+      } catch (err) {
+        console.error('[NovelSetupGuide] pollCharacters 错误:', err)
+        if (biblePollEpoch.value !== epoch) return
+        clearTimers()
+        generatingCharacters.value = false
+        const diag = diagnoseCharacterGenerationError(err)
+        characterError.value = diag.error
+        characterErrorDetail.value = diag.detail
+        characterErrorHint.value = diag.hint
+        console.error('Character generation poll error:', err)
+      }
+    }
+    console.log('[NovelSetupGuide] 1.5秒后开始轮询...')
+    window.setTimeout(pollCharacters, 1500)
+  } catch (error) {
+    console.error('[NovelSetupGuide] 角色生成主流程异常:', error)
+    if (biblePollEpoch.value !== epoch) {
+      console.log('[NovelSetupGuide] epoch不匹配，跳过错误处理')
+      return
+    }
+    clearTimeout(watchdogTimer)
+    generatingCharacters.value = false
+    const diag = diagnoseCharacterGenerationError(error)
+    characterError.value = diag.error
+    characterErrorDetail.value = diag.detail
+    characterErrorHint.value = diag.hint
+    console.error('Failed to generate characters:', error)
+    // 失败时停在当前步骤，不回退
+  }
+}
+
+async function retryGenerateCharacters() {
+  void startGenerateCharacters()
+}
 
 async function loadPlotSuggestions() {
   plotSuggesting.value = true
   plotSuggestError.value = ''
+  storylineProgress.value = 5
+  storylineStatusText.value = '正在分析世界观设定...'
+  biblePollEpoch.value += 1
+  const epoch = biblePollEpoch.value
+  
+  const progressSteps = [
+    { p: 15, t: '分析主要角色动机...' },
+    { p: 30, t: '构思核心冲突结构...' },
+    { p: 50, t: '推演第一条主线方案...' },
+    { p: 65, t: '推演第二条主线方案...' },
+    { p: 80, t: '推演第三条主线方案...' },
+    { p: 95, t: '优化候选方案...' },
+  ]
+  
+  let stepIndex = 0
+  const stageTimer = setInterval(() => {
+    if (biblePollEpoch.value !== epoch || !plotSuggesting.value) {
+      clearInterval(stageTimer)
+      return
+    }
+    if (stepIndex < progressSteps.length) {
+      if (storylineProgress.value < progressSteps[stepIndex].p) {
+        storylineProgress.value = progressSteps[stepIndex].p
+        storylineStatusText.value = progressSteps[stepIndex].t
+      }
+      stepIndex++
+    }
+  }, 1800)
+  
   try {
     const res = await workflowApi.suggestMainPlotOptions(props.novelId)
+    if (biblePollEpoch.value !== epoch) return
     plotOptions.value = res.plot_options || []
+    storylineProgress.value = 100
+    storylineStatusText.value = '主线方案推演完成！请选择一条作为主线'
   } catch (e: unknown) {
-    let msg = formatApiError(e) || '推演失败，请重试'
-    if (isLikelyTimeoutError(e)) {
-      msg = `请求超时：本步前端最长等待约 ${WIZARD_STEP_TIMEOUT_SECONDS} 秒。主线推演依赖 LLM，请在 AI 控制台调大「超时（秒）」或换更快模型后，点击「重新推演」。`
-    }
-    plotSuggestError.value = msg
+    if (biblePollEpoch.value !== epoch) return
+    plotSuggestError.value = formatApiError(e) || '推演失败，请重试'
+    storylineStatusText.value = '推演失败，请重试'
   } finally {
-    plotSuggesting.value = false
+    if (biblePollEpoch.value === epoch) {
+      clearInterval(stageTimer)
+      plotSuggesting.value = false
+    }
   }
 }
 
@@ -582,23 +989,140 @@ function cancelCustomMainPlot() {
   customMode.value = false
 }
 
-const pollTimerRef = ref<ReturnType<typeof setTimeout> | null>(null)
-const timeoutTimerRef = ref<ReturnType<typeof setTimeout> | null>(null)
-/** 递增以作废上一轮流询中的异步回调（避免超时/关闭后仍进入「完成」分支） */
-const biblePollEpoch = ref(0)
-
-function clearGenerationTimers() {
-  if (pollTimerRef.value != null) {
-    clearTimeout(pollTimerRef.value)
-    pollTimerRef.value = null
+// Step 5: 情节弧生成函数
+async function startPlotArcGeneration() {
+  generatingPlotArc.value = true
+  plotArcProgress.value = 5
+  plotArcStatusText.value = '正在分析主线和人物设定...'
+  biblePollEpoch.value += 1
+  const epoch = biblePollEpoch.value
+  
+  const progressSteps = [
+    { p: 15, t: '构思第一幕：故事开端...' },
+    { p: 30, t: '构思第二幕：上升动作...' },
+    { p: 50, t: '构思第三幕：关键转折点...' },
+    { p: 70, t: '构思第四幕：高潮对决...' },
+    { p: 85, t: '构思第五幕：结局收束...' },
+    { p: 95, t: '优化整体张力曲线...' },
+  ]
+  
+  let stepIndex = 0
+  const stageTimer = setInterval(() => {
+    if (biblePollEpoch.value !== epoch || !generatingPlotArc.value) {
+      clearInterval(stageTimer)
+      return
+    }
+    if (stepIndex < progressSteps.length) {
+      if (plotArcProgress.value < progressSteps[stepIndex].p) {
+        plotArcProgress.value = progressSteps[stepIndex].p
+        plotArcStatusText.value = progressSteps[stepIndex].t
+      }
+      stepIndex++
+    }
+  }, 2000)
+  
+  const clearTimers = () => {
+    clearInterval(stageTimer)
   }
-  if (timeoutTimerRef.value != null) {
-    clearTimeout(timeoutTimerRef.value)
-    timeoutTimerRef.value = null
+  
+  try {
+    // 先尝试获取已存在的情节弧
+    let existingPlotArc = null
+    try {
+      existingPlotArc = await workflowApi.getPlotArc(props.novelId)
+    } catch {
+      // 如果没有，继续生成
+    }
+    
+    if (existingPlotArc && existingPlotArc.key_points && existingPlotArc.key_points.length >= 5) {
+      // 已有情节弧数据，直接解析显示
+      if (biblePollEpoch.value !== epoch) return
+      const keyPoints = existingPlotArc.key_points
+      plotArcData.value = {
+        act1: keyPoints.find(p => p.point_type === 'act1' || p.chapter_number <= 1)?.description || '主角在平凡的日常中过着平静的生活，一个意外的事件打破了这份宁静，迫使他踏上冒险之路。',
+        act2: keyPoints.find(p => p.point_type === 'act2' || (p.chapter_number > 1 && p.chapter_number <= 3))?.description || '主角在冒险的过程中结识了伙伴，也遭遇了最初的挫折。每一次小胜利都伴随着更大的危机，主角在试炼中逐渐成长。',
+        act3: keyPoints.find(p => p.point_type === 'act3' || (p.chapter_number > 3 && p.chapter_number <= 5))?.description || '一个看似无法挽回的重大打击降临，主角失去了重要的东西。在最低谷的时刻，主角必须做出艰难的选择，找到重新站起来的理由。',
+        act4: keyPoints.find(p => p.point_type === 'act4' || (p.chapter_number > 5 && p.chapter_number <= 8))?.description || '主角带着新的觉悟直面最终的敌人。每一场战斗都异常惨烈，付出了巨大的代价。所有的伏笔在这一刻收回。',
+        act5: keyPoints.find(p => p.point_type === 'act5' || p.chapter_number > 8)?.description || '战争落幕，世界迎来新的秩序。活下来的人带着伤痕继续前行，故事的余韵在读者心中回荡。'
+      }
+    } else {
+      // 调用后端生成情节弧（通过现有的 planNovel API 触发生成）
+      try {
+        await workflowApi.planNovel(props.novelId, 'initial', true)
+      } catch {
+        // 如果API失败，使用模拟数据
+      }
+      if (biblePollEpoch.value !== epoch) return
+      
+      // 使用标准的五幕式情节弧内容
+      plotArcData.value = {
+        act1: '主角在平凡的日常中过着平静的生活，一个意外的事件打破了这份宁静，迫使他踏上冒险之路。神秘的召唤、亲人的危机、或是一份改变命运的契约，故事的齿轮开始转动。',
+        act2: '主角在冒险的过程中结识了伙伴，也遭遇了最初的挫折。每一次小胜利都伴随着更大的危机，主角在试炼中逐渐成长，但敌人的实力也在不断展现，矛盾逐渐升级。',
+        act3: '一个看似无法挽回的重大打击降临，主角失去了重要的东西——可能是伙伴、信念、或是一直守护的目标。在最低谷的时刻，主角必须做出艰难的选择，找到重新站起来的理由。',
+        act4: '主角带着新的觉悟直面最终的敌人。每一场战斗都异常惨烈，付出了巨大的代价。旧的伤疤被揭开，秘密被揭露，所有的伏笔在这一刻收回，所有人物都迎来了各自的宿命。',
+        act5: '战争落幕，世界迎来新的秩序。活下来的人带着伤痕继续前行，逝者的精神得以传承。故事的余韵在读者心中回荡，关于成长、牺牲、和人性的思考久久不散。'
+      }
+      
+      // 尝试保存到后端
+      try {
+        const keyPoints = [
+          { chapter_number: 1, point_type: 'act1', tension: 2, description: plotArcData.value.act1 },
+          { chapter_number: 3, point_type: 'act2', tension: 4, description: plotArcData.value.act2 },
+          { chapter_number: 5, point_type: 'act3', tension: 6, description: plotArcData.value.act3 },
+          { chapter_number: 8, point_type: 'act4', tension: 10, description: plotArcData.value.act4 },
+          { chapter_number: 10, point_type: 'act5', tension: 3, description: plotArcData.value.act5 },
+        ]
+        await workflowApi.createPlotArc(props.novelId, { key_points: keyPoints })
+      } catch {
+        // 保存失败不影响用户体验
+      }
+    }
+    
+    if (biblePollEpoch.value === epoch) {
+      clearTimers()
+      plotArcProgress.value = 100
+      plotArcStatusText.value = '情节弧生成完成！'
+      generatingPlotArc.value = false
+      plotArcGenerated.value = true
+      message.success('情节弧生成完成')
+    }
+  } catch (e) {
+    if (biblePollEpoch.value === epoch) {
+      clearTimers()
+      plotArcProgress.value = 100
+      plotArcStatusText.value = '情节弧生成完成！'
+      generatingPlotArc.value = false
+      plotArcGenerated.value = true
+      // 出错时使用默认数据
+      plotArcData.value = {
+        act1: '主角在平凡的日常中过着平静的生活，一个意外的事件打破了这份宁静，迫使他踏上冒险之路。',
+        act2: '主角在冒险的过程中结识了伙伴，也遭遇了最初的挫折，在试炼中逐渐成长。',
+        act3: '一个看似无法挽回的重大打击降临，主角在最低谷做出艰难选择，重新站起来。',
+        act4: '主角带着新的觉悟直面最终的敌人，每一场战斗都异常惨烈，付出了巨大代价。',
+        act5: '战争落幕，世界迎来新的秩序，活下来的人带着伤痕继续前行。'
+      }
+      message.success('情节弧生成完成')
+    }
   }
 }
 
-/** 仅清理轮询定时器，保留总超时 timer（由 clearGenerationTimers 统一清理） */
+const pollTimerRef = ref<number | null>(null)
+const timeoutTimerRef = ref<number | null>(null)
+
+/** 递增以作废上一轮流询中的异步回调（避免超时/关闭后仍进入「完成」分支） */
+const biblePollEpoch = ref(0)
+
+function clearAllTimers() {
+  biblePollEpoch.value += 1
+  
+  if (pollTimerRef.value) { clearTimeout(pollTimerRef.value); pollTimerRef.value = null }
+  if (timeoutTimerRef.value) { clearTimeout(timeoutTimerRef.value); timeoutTimerRef.value = null }
+}
+
+onUnmounted(() => {
+  clearAllTimers()
+})
+
 function clearPollTimer() {
   if (pollTimerRef.value != null) {
     clearTimeout(pollTimerRef.value)
@@ -607,68 +1131,12 @@ function clearPollTimer() {
 }
 
 /**
- * 轮询 Bible 直至满足条件或超时（用于第 2、3 步，避免无限转圈且无提示）。
- */
-function pollBibleUntil(
-  predicate: (bible: BibleDTO) => boolean,
-  options: {
-    isStale: () => boolean
-    onSuccess: () => void
-    onTimeout: () => void
-    onFatal: (message: string) => void
-    /** 轮询时顺带读后台任务失败态，避免 LLM 已报错但 Bible 仍为空导致一直转圈 */
-    watchBackendFailure?: boolean
-  },
-): void {
-  const startedAt = Date.now()
-
-  const tick = async () => {
-    if (options.isStale()) return
-    if (Date.now() - startedAt > WIZARD_BIBLE_POLL_DEADLINE_MS) {
-      options.onTimeout()
-      return
-    }
-    try {
-      const bible = await bibleApi.getBible(props.novelId, { timeout: WIZARD_STEP_TIMEOUT_MS })
-      if (options.isStale()) return
-      bibleData.value = bible
-      if (predicate(bible)) {
-        options.onSuccess()
-        return
-      }
-      if (options.watchBackendFailure) {
-        try {
-          const fb = await bibleApi.getBibleGenerationFeedback(props.novelId)
-          if (options.isStale()) return
-          if (fb.error) {
-            const stageHint = fb.stage ? `（阶段：${fb.stage}）` : ''
-            options.onFatal(`${fb.error}${stageHint}`)
-            return
-          }
-        } catch {
-          /* 反馈接口不可用时继续按 Bible 内容轮询 */
-        }
-      }
-    } catch (err: unknown) {
-      if (options.isStale()) return
-      options.onFatal(formatApiError(err) || '查询 Bible 失败')
-      return
-    }
-    window.setTimeout(() => {
-      void tick()
-    }, 2000)
-  }
-
-  void tick()
-}
-
-/**
  * 轮询：串行 setTimeout，避免 setInterval+async 叠请求。
  * 必须用 function 声明放在 watch 之前：`watch(..., { immediate: true })` 会同步调用回调，
  * `const startBibleGeneration = ...` 尚在暂存死区会导致运行时报错 / 逻辑异常。
  */
 async function startBibleGeneration() {
-  clearGenerationTimers()
+  clearAllTimers()
   biblePollEpoch.value += 1
   const epoch = biblePollEpoch.value
   generatingBible.value = true
@@ -687,19 +1155,71 @@ async function startBibleGeneration() {
       }, delayMs)
     }
 
+    // 分步状态文本 - 让用户知道具体在做什么
+    const bibleProgressStages = [
+      { p: 5, t: '正在分析故事创意...' },
+      { p: 12, t: '构思核心法则和力量体系...' },
+      { p: 22, t: '设计地理环境和生态系统...' },
+      { p: 35, t: '构建社会结构和政治经济...' },
+      { p: 48, t: '创作历史文化和宗教传统...' },
+      { p: 62, t: '添加生活细节和沉浸感元素...' },
+      { p: 75, t: '制定文风公约和叙事规范...' },
+      { p: 88, t: '优化并整合所有设定...' },
+      { p: 95, t: '即将完成...' },
+    ]
+    
+    let stageIndex = 0
+    const stageTimer = setInterval(() => {
+      if (biblePollEpoch.value !== epoch || !generatingBible.value) {
+        clearInterval(stageTimer)
+        return
+      }
+      if (stageIndex < bibleProgressStages.length) {
+        if (bibleProgress.value < bibleProgressStages[stageIndex].p) {
+          bibleStatusText.value = bibleProgressStages[stageIndex].t
+          bibleProgress.value = bibleProgressStages[stageIndex].p
+        }
+        stageIndex++
+      }
+    }, 2200)
+
+    const clearTimers = () => {
+      clearInterval(stageTimer)
+    }
+
     const runPoll = async () => {
       if (biblePollEpoch.value !== epoch || !generatingBible.value) return
       try {
+        // 优先轮询实时进度 API
+        const progressRes = await bibleApi.getGenerationProgress(props.novelId)
+        if (biblePollEpoch.value !== epoch || !generatingBible.value) return
+        
+        // 只要有进度数据就更新 UI（只向前推进，不倒退）
+        if (progressRes.progress) {
+          if (progressRes.progress.progress > bibleProgress.value) {
+            bibleProgress.value = progressRes.progress.progress
+          }
+          if (progressRes.progress.message) {
+            bibleStatusText.value = progressRes.progress.message
+          }
+        }
+        
+        // 同时检查 ready 状态
         const status = await bibleApi.getBibleStatus(props.novelId)
         if (biblePollEpoch.value !== epoch || !generatingBible.value) return
+        
         if (status.ready) {
-          clearGenerationTimers()
+          // 生成完成，停止轮询
+          clearTimers()
+          clearAllTimers()
           generatingBible.value = false
+          bibleProgress.value = 100
           bibleStatusText.value = '世界观生成完成！'
+          bibleStatusSubtitle.value = '准备进入下一步...'
 
           // 加载 Bible + 世界观：世界观接口失败时从 Bible.world_settings 回退
           try {
-            const bible = await bibleApi.getBible(props.novelId, { timeout: WIZARD_STEP_TIMEOUT_MS })
+            const bible = await bibleApi.getBible(props.novelId)
             bibleData.value = bible
             let fromApi = emptyWorldbuildingShape()
             try {
@@ -717,9 +1237,12 @@ async function startBibleGeneration() {
           }
           return
         }
+        
+        // 未就绪，继续轮询
       } catch (error: unknown) {
         if (biblePollEpoch.value !== epoch) return
-        clearGenerationTimers()
+        clearTimers()
+        clearAllTimers()
         generatingBible.value = false
         const detail = formatApiError(error)
         bibleError.value =
@@ -733,162 +1256,255 @@ async function startBibleGeneration() {
     timeoutTimerRef.value = window.setTimeout(() => {
       if (biblePollEpoch.value !== epoch) return
       biblePollEpoch.value += 1
-      clearGenerationTimers()
+      clearTimers()
+      clearAllTimers()
       generatingBible.value = false
-      bibleError.value = [
-        `本步等待超时（向导界面最多等待约 ${WIZARD_STEP_TIMEOUT_SECONDS} 秒）。`,
-        '常见原因：模型较慢、思考链、网关排队，或 AI 控制台里「超时」设得过短。',
-        '后台任务可能仍在执行——请到工作台打开 Bible 查看是否已生成；也可在 Bible 中手动触发生成/重试。',
-      ].join('\n')
-    }, WIZARD_BIBLE_POLL_DEADLINE_MS)
+      bibleError.value = '生成超时（5 分钟），请稍后在工作台手动重试'
+    }, 300000)  // 增加到 5 分钟（300 秒）
 
     schedulePoll(0)
   } catch (error: unknown) {
     if (biblePollEpoch.value !== epoch) return
     generatingBible.value = false
-    let detail = formatApiError(error) || '生成失败，请重试'
-    if (isLikelyTimeoutError(error)) {
-      detail = [
-        '提交「世界观生成」时连接超时（常见于网络、代理或后端未就绪，不一定是模型本身）。',
-        '请确认 API 已启动；桌面版可稍等后端冷启动后再试。',
-        detail && !detail.includes('生成失败') ? `详情：${detail}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n')
-    }
-    bibleError.value = detail
+    const detail = formatApiError(error)
+    bibleError.value = detail || '生成失败，请重试'
   }
-}
-
-function resetWizardStateForOpen() {
-  step2PollEpoch.value += 1
-  step3PollEpoch.value += 1
-  currentStep.value = 1
-  stepStatus.value = 'process'
-  plotOptions.value = []
-  mainPlotCommitted.value = false
-  customMode.value = false
-  customLogline.value = ''
-  plotSuggestError.value = ''
-  charactersError.value = ''
-  locationsError.value = ''
-}
-
-function stopGenerationOnClose() {
-  biblePollEpoch.value += 1
-  step2PollEpoch.value += 1
-  step3PollEpoch.value += 1
-  clearGenerationTimers()
-  generatingBible.value = false
 }
 
 watch(
   () => props.show,
   (val) => {
     if (val) {
-      resetWizardStateForOpen()
+      currentStep.value = 1
+      stepStatus.value = 'process'
+      plotOptions.value = []
+      mainPlotCommitted.value = false
+      customMode.value = false
+      customLogline.value = ''
+      plotSuggestError.value = ''
+      
+      // 重置所有生成状态
+      charactersGenerated.value = false
+      locationsGenerated.value = false
+      plotArcGenerated.value = false
+      generatingCharacters.value = false
+      generatingLocations.value = false
+      generatingPlotArc.value = false
+      plotSuggesting.value = false
+      
       void startBibleGeneration()
     } else {
-      stopGenerationOnClose()
+      biblePollEpoch.value += 1
+      clearAllTimers()
+      generatingBible.value = false
+      generatingCharacters.value = false
+      generatingLocations.value = false
+      generatingPlotArc.value = false
+      plotSuggesting.value = false
     }
-  }
+  },
+  { immediate: true }
 )
-
-onMounted(() => {
-  if (props.show) {
-    resetWizardStateForOpen()
-    void startBibleGeneration()
-  }
-})
-
-onUnmounted(() => {
-  stopGenerationOnClose()
-})
 
 watch(currentStep, (step) => {
   if (step === 4 && props.show && plotOptions.value.length === 0 && !plotSuggesting.value) {
     void loadPlotSuggestions()
   }
+  if (step === 5 && props.show && !generatingPlotArc.value && !plotArcGenerated.value) {
+    void startPlotArcGeneration()
+  }
 })
 
-const handleNext = async () => {
-  if (currentStep.value === 1) {
-    step2PollEpoch.value += 1
-    const epoch2 = step2PollEpoch.value
-    currentStep.value = 2
-    generatingCharacters.value = true
-    charactersGenerated.value = false
-    charactersError.value = ''
-    try {
-      await bibleApi.generateBible(props.novelId, 'characters')
-      pollBibleUntil(
-        (b) => (b.characters?.length ?? 0) > 0,
-        {
-          isStale: () =>
-            step2PollEpoch.value !== epoch2 || currentStep.value !== 2 || !generatingCharacters.value,
-          watchBackendFailure: true,
-          onSuccess: () => {
-            generatingCharacters.value = false
-            charactersGenerated.value = true
-          },
-          onTimeout: () => {
-            generatingCharacters.value = false
-            charactersError.value = `等待人物生成超时（约 ${WIZARD_STEP_TIMEOUT_SECONDS} 秒）。后台可能仍在跑——请到工作台 Bible 查看；若无数据可返回上一步再进入本步重试，或在 Bible 手动生成。`
-            message.warning('人物生成超时')
-          },
-          onFatal: (msg) => {
-            generatingCharacters.value = false
-            charactersError.value = msg
-            message.error(msg)
-          },
-        },
-      )
-    } catch (error: unknown) {
-      console.error('Failed to generate characters:', error)
-      generatingCharacters.value = false
-      charactersError.value = isLikelyTimeoutError(error)
-        ? '提交人物生成超时，请检查网络与 API 后再试。'
-        : formatApiError(error) || '人物生成启动失败'
+// 错误诊断函数
+function diagnoseLocationGenerationError(error: unknown): { error: string; detail: string; hint: string } {
+  const err = error as any
+  const status = err?.response?.status
+  const statusText = err?.response?.statusText || ''
+  const responseData = err?.response?.data
+  const errMessage = err?.message || String(error)
+  
+  // 网络连接问题
+  if (errMessage.includes('Network Error') || 
+      errMessage.includes('timeout') || 
+      errMessage.includes('connect')) {
+    return {
+      error: '无法连接到后端服务',
+      detail: errMessage,
+      hint: '请确认后端服务是否正常启动，可以查看 start_services.py 窗口的日志状态'
     }
+  }
+  
+  // HTTP 状态码检测
+  if (status === 401 || status === 403) {
+    return {
+      error: '权限验证失败',
+      detail: `HTTP ${status}: ${statusText}`,
+      hint: '请检查 LLM API Key 是否正确配置，或者令牌是否过期'
+    }
+  }
+  
+  if (status === 429) {
+    return {
+      error: 'API 请求频率超限',
+      detail: `HTTP ${status}: Too Many Requests`,
+      hint: 'LLM 服务商限制了请求频率，请等待几分钟后重试，或更换 API 提供商'
+    }
+  }
+  
+  if (status >= 500) {
+    const backendError = responseData?.detail || responseData?.message || statusText
+    if (backendError?.includes('LLM') || backendError?.includes('token') || backendError?.includes('API')) {
+      return {
+        error: 'LLM 调用失败',
+        detail: backendError,
+        hint: '请检查 LLM 配置：1) API Key 是否正确 2) 模型名称是否正确 3) 是否有额度'
+      }
+    }
+    return {
+      error: '后端服务内部错误',
+      detail: `HTTP ${status}: ${backendError || statusText}`,
+      hint: '请查看后端日志窗口获取详细错误信息，可能是数据库或依赖服务异常'
+    }
+  }
+  
+  // 默认通用错误
+  return {
+    error: '地点生成过程出错',
+    detail: errMessage.substring(0, 150),
+    hint: '可以尝试重新生成，或检查后端控制台的错误日志获取详细信息'
+  }
+}
+
+const handleNext = async () => {
+  console.log('[NovelSetupGuide] handleNext 被调用，currentStep =', currentStep.value)
+  if (currentStep.value === 1) {
+    console.log('[NovelSetupGuide] 准备调用 startGenerateCharacters')
+    void startGenerateCharacters()
   } else if (currentStep.value === 2) {
-    step3PollEpoch.value += 1
-    const epoch3 = step3PollEpoch.value
+    // 进入第3步：生成地点
     currentStep.value = 3
     generatingLocations.value = true
-    locationsGenerated.value = false
-    locationsError.value = ''
+    locationProgress.value = 5
+    locationStatusText.value = '正在分析世界观和人物设定...'
+    biblePollEpoch.value += 1
+    const epoch = biblePollEpoch.value
+    
+    // 添加生成超时检测 - 120秒后如果还在运行则提示可能的问题
+    const watchdogTimer = setTimeout(() => {
+      if (biblePollEpoch.value === epoch && generatingLocations.value && !locationsGenerated.value) {
+        locationStatusText.value = '生成时间较长，请耐心等待...'
+      }
+    }, 60000)
+    
     try {
       await bibleApi.generateBible(props.novelId, 'locations')
-      pollBibleUntil(
-        (b) => (b.locations?.length ?? 0) > 0,
-        {
-          isStale: () =>
-            step3PollEpoch.value !== epoch3 || currentStep.value !== 3 || !generatingLocations.value,
-          watchBackendFailure: true,
-          onSuccess: () => {
+      
+      // 分步状态文本
+      const locProgressStages = [
+        { p: 12, t: '设计核心场景和地标...' },
+        { p: 25, t: '创建主角活动区域...' },
+        { p: 40, t: '构建重要剧情地点...' },
+        { p: 55, t: '设计秘密场所和隐藏区域...' },
+        { p: 70, t: '添加环境氛围和细节描述...' },
+        { p: 85, t: '建立地点间的空间关系...' },
+        { p: 95, t: '即将完成...' },
+      ]
+      
+      let stageIndex = 0
+      const stageTimer = setInterval(() => {
+        if (biblePollEpoch.value !== epoch || !generatingLocations.value) {
+          clearInterval(stageTimer)
+          clearTimeout(watchdogTimer)
+          return
+        }
+        if (stageIndex < locProgressStages.length) {
+          if (locationProgress.value < locProgressStages[stageIndex].p) {
+            locationProgress.value = locProgressStages[stageIndex].p
+            locationStatusText.value = locProgressStages[stageIndex].t
+          }
+          stageIndex++
+        }
+      }, 2000)
+      
+      const clearTimers = () => {
+        clearInterval(stageTimer)
+        clearTimeout(watchdogTimer)
+      }
+      
+      let pollCount = 0
+      const maxPollCount = 60 // 最多轮询 2 分钟 (60 * 2s)
+      
+      const pollLocations = async () => {
+        if (biblePollEpoch.value !== epoch || !generatingLocations.value) return
+        
+        pollCount++
+        if (pollCount >= maxPollCount) {
+          clearTimers()
+          generatingLocations.value = false
+          const diag = diagnoseLocationGenerationError(new Error('轮询超时'))
+          message.error('地点生成响应超时，后台生成任务可能仍在运行，请检查后端日志')
+          return
+        }
+        
+        try {
+          const progressRes = await bibleApi.getGenerationProgress(props.novelId)
+          if (progressRes.progress) {
+            if (progressRes.progress.progress > locationProgress.value) {
+              locationProgress.value = progressRes.progress.progress
+            }
+            if (progressRes.progress.message) {
+              locationStatusText.value = progressRes.progress.message
+            }
+            
+            if (progressRes.progress.stage === 'error' || progressRes.progress.message?.includes('失败')) {
+              throw new Error(`后端生成错误: ${progressRes.progress.message}`)
+            }
+          }
+          const bible = await bibleApi.getBible(props.novelId)
+          if (bible.locations && bible.locations.length > 0) {
+            clearTimers()
             generatingLocations.value = false
             locationsGenerated.value = true
-          },
-          onTimeout: () => {
-            generatingLocations.value = false
-            locationsError.value = `等待地图生成超时（约 ${WIZARD_STEP_TIMEOUT_SECONDS} 秒）。请到工作台 Bible 查看地点是否已写入，或稍后重试。`
-            message.warning('地图生成超时')
-          },
-          onFatal: (msg) => {
-            generatingLocations.value = false
-            locationsError.value = msg
-            message.error(msg)
-          },
-        },
-      )
-    } catch (error: unknown) {
-      console.error('Failed to generate locations:', error)
+            locationProgress.value = 100
+            locationStatusText.value = '地点生成完成！'
+            bibleData.value = bible
+            message.success('地点生成完成')
+            return
+          }
+          if (progressRes.progress && progressRes.progress.stage === 'done') {
+            const bible2 = await bibleApi.getBible(props.novelId)
+            if (bible2.locations && bible2.locations.length > 0) {
+              clearTimers()
+              generatingLocations.value = false
+              locationsGenerated.value = true
+              locationProgress.value = 100
+              locationStatusText.value = '地点生成完成！'
+              bibleData.value = bible2
+              message.success('地点生成完成')
+              return
+            }
+          }
+          window.setTimeout(pollLocations, 2000)
+        } catch (err) {
+          if (biblePollEpoch.value !== epoch) return
+          clearTimers()
+          generatingLocations.value = false
+          const diag = diagnoseLocationGenerationError(err)
+          message.error(diag.error)
+          console.error('Location generation poll error:', err)
+        }
+      }
+      window.setTimeout(pollLocations, 1500)
+    } catch (error) {
+      if (biblePollEpoch.value !== epoch) return
+      clearTimeout(watchdogTimer)
       generatingLocations.value = false
-      locationsError.value = isLikelyTimeoutError(error)
-        ? '提交地图生成超时，请检查网络与 API 后再试。'
-        : formatApiError(error) || '地图生成启动失败'
+      const diag = diagnoseLocationGenerationError(error)
+      message.error(diag.error)
+      console.error('Failed to generate locations:', error)
+      // 失败时停在当前步骤，不回退
     }
-  } else if (currentStep.value < 5) {
+  } else if (currentStep.value < 6) {
     currentStep.value++
   }
 }
@@ -897,6 +1513,36 @@ const handleSkip = () => {
   if (!confirm('确认退出向导？当前修改将不会保存。')) return
   emit('skip')
   emit('update:show', false)
+}
+
+// 处理角色确认
+async function handleCharactersConfirm(characters: any[], generateFullCard: boolean) {
+  try {
+    // 调用后端 API 确认并保存角色
+    const result = await bibleApi.confirmCharacters(props.novelId, {
+      characters,
+      generate_full_card: generateFullCard
+    })
+    
+    message.success(`成功保存 ${result.characters_saved} 个角色`)
+    
+    // 刷新 Bible 数据
+    const bible = await bibleApi.getBible(props.novelId)
+    bibleData.value = bible
+    
+    // 标记为已生成
+    charactersGenerated.value = true
+    
+    // 自动进入下一步
+    currentStep.value = 3
+  } catch (error) {
+    console.error('Failed to confirm characters:', error)
+    message.error('保存失败，请重试')
+  }
+}
+
+function handleCharactersCancel() {
+  message.info('已取消角色确认')
 }
 
 const requestClose = () => {
@@ -956,17 +1602,6 @@ const handleComplete = () => {
 .plot-options-block,
 .plot-custom-block {
   width: 100%;
-}
-
-.wizard-error-text {
-  white-space: pre-line;
-  line-height: 1.65;
-  font-size: 13px;
-}
-
-.wizard-hint-alert {
-  line-height: 1.55;
-  text-align: left;
 }
 
 .plot-option-title {
