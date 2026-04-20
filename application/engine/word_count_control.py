@@ -30,23 +30,26 @@ async def _invoke_llm_caller(
     try:
         signature = inspect.signature(llm_caller)
     except (TypeError, ValueError):
-        signature = None
+        # 无法获取签名，先尝试直接调用
+        try:
+            return await llm_caller(prompt, config or GenerationConfig())
+        except (TypeError, ValueError):
+            # 如果失败，尝试只传一个参数
+            return await llm_caller(prompt)
 
     if signature is not None:
-        positional = [
-            parameter
-            for parameter in signature.parameters.values()
-            if parameter.kind in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
-        ]
-        has_varargs = any(
-            parameter.kind == inspect.Parameter.VAR_POSITIONAL
-            for parameter in signature.parameters.values()
-        )
-        if has_varargs or len(positional) >= 2:
-            return await llm_caller(prompt, config or GenerationConfig())
+        params = list(signature.parameters.values())
+        # 检查是否至少有一个参数
+        if len(params) == 1:
+            # 只接受一个参数
+            return await llm_caller(prompt)
+        else:
+            # 可能接受两个参数
+            try:
+                return await llm_caller(prompt, config or GenerationConfig())
+            except (TypeError, ValueError):
+                # 失败的话只传一个参数
+                return await llm_caller(prompt)
 
     return await llm_caller(prompt)
 
